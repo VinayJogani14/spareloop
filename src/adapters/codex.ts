@@ -27,6 +27,9 @@ export class CodexAdapter implements RollingWindowAdapter {
     hasRollingWindow: true,
     reportsDollarCost: false,
     reportsTokens: true,
+    // `codex exec resume` exists but headless-resume semantics are unverified;
+    // enable once validated against a real install.
+    supportsSessionResume: false,
   };
 
   buildArgs(opts: RunOptions): string[] {
@@ -48,7 +51,8 @@ export class CodexAdapter implements RollingWindowAdapter {
       this.buildArgs(opts),
       opts.projectDir,
       runId,
-      opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+      opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      opts.env
     );
 
     if (res.timedOut) return { kind: 'timeout', stdoutLogPath: res.stdoutLogPath };

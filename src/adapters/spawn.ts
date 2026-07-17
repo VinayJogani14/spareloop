@@ -24,7 +24,8 @@ export function spawnCapture(
   args: string[],
   cwd: string,
   runId: string,
-  timeoutMs: number
+  timeoutMs: number,
+  envOverrides?: Record<string, string>
 ): Promise<SpawnResult> {
   const stdoutLogPath = path.join(runLogsDir(), `${runId}.stdout.log`);
   const stderrLogPath = path.join(runLogsDir(), `${runId}.stderr.log`);
@@ -33,7 +34,11 @@ export function spawnCapture(
   const start = Date.now();
 
   return new Promise((resolve) => {
-    const child = spawn(bin, args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(bin, args, {
+      cwd,
+      env: envOverrides ? { ...process.env, ...envOverrides } : process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
 
     let stdout = '';
     let stderr = '';

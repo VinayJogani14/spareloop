@@ -20,6 +20,7 @@ export class CursorAdapter implements CliAdapter {
     hasRollingWindow: false,
     reportsDollarCost: false,
     reportsTokens: false,
+    supportsSessionResume: false,
   };
 
   buildArgs(opts: RunOptions): string[] {
@@ -42,7 +43,8 @@ export class CursorAdapter implements CliAdapter {
       this.buildArgs(opts),
       opts.projectDir,
       runId,
-      opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+      opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      opts.env
     );
 
     if (res.timedOut) return { kind: 'timeout', stdoutLogPath: res.stdoutLogPath };

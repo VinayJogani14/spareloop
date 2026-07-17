@@ -20,6 +20,9 @@ import { computePrewarm, getPrewarmConfig, setPrewarmConfig } from '../core/patt
 import { generateSuggestions } from '../core/patterns/suggestionEngine';
 import { assessCapacity } from '../core/scheduler/capacityPlanner';
 import { readDaemonPid, runDaemon, runSingleTick } from '../daemon/index';
+import { successfulSessionId } from '../core/repo';
+import { addAccount, envForAccount, getAccount, listAccounts, loginCommand, removeAccount } from '../core/accounts';
+import { addProfile, getProfile, listProfiles, removeProfile } from '../core/profiles';
 import { detectBackend, install, uninstall, Backend } from '../daemon/installers/index';
 import { executeTask } from '../daemon/taskRunner';
 
@@ -56,7 +59,7 @@ program
   .command('add')
   .description('Queue a task to run unattended')
   .requiredOption('--prompt <text>', 'the task/instruction for the agent')
-  .requiredOption('--tool <tool>', 'claude | codex | cursor')
+  .option('--tool <tool>', 'claude | codex | cursor (or supplied by --profile)')
   .option('--dir <path>', 'project directory to run in', process.cwd())
   .option('--model <model>', 'model override (tool default if omitted)')
   .option('--permission-mode <mode>', 'allowlist (safe default) | full_bypass', 'allowlist')
@@ -67,10 +70,53 @@ program
   .option('--priority <n>', 'higher runs first', '0')
   .option('--max-attempts <n>', 'retry budget', '3')
   .option('--budget-usd <amount>', 'max spend for the run (enforced natively by Claude only)')
+  .option('--account <name>', 'run under a registered account, or "auto" to route to whichever has capacity')
+  .option('--after <task-id>', 'run only after that task succeeds (chain)')
+  .option('--same-session', 'with --after: resume the dependency\'s session instead of starting fresh')
+  .option('--continue-from <task-id>', 'resume the session of a previously completed task')
+  .option('--instructions <text>', 'standing directions prepended to the prompt')
+  .option('--instructions-file <path>', 'read --instructions from a file')
+  .option('--no-branch', 'run directly in the working tree instead of an isolated git worktree branch')
+  .option('--profile <name>', 'start from a saved profile (tool/dir/model/account/instructions)')
   .action((opts) => {
+    const profile = opts.profile ? getProfile(opts.profile) : undefined;
+    if (opts.profile && !profile) fail(`no profile named ${opts.profile}`);
+    if (profile) {
+      opts.tool = opts.tool ?? profile.tool;
+      opts.dir = opts.dir === process.cwd() ? profile.project_dir : opts.dir;
+      opts.model = opts.model ?? profile.model ?? undefined;
+      opts.account = opts.account ?? profile.account ?? undefined;
+      opts.instructions = opts.instructions ?? profile.instructions ?? undefined;
+      if (profile.permission_mode === 'full_bypass' && opts.permissionMode === 'allowlist')
+        opts.permissionMode = 'full_bypass';
+    }
     if (!isToolName(opts.tool)) fail(`unknown tool: ${opts.tool} (expected claude|codex|cursor)`);
     if (opts.permissionMode !== 'allowlist' && opts.permissionMode !== 'full_bypass')
       fail('permission-mode must be allowlist or full_bypass');
+    if (opts.account && opts.account !== 'auto' && !getAccount(opts.account))
+      fail(`no account named ${opts.account} (register with: spareloop account add)`);
+    if (opts.sameSession && !opts.after) fail('--same-session requires --after');
+
+    let instructions: string | null = opts.instructions ?? null;
+    if (opts.instructionsFile) {
+      const p = path.resolve(opts.instructionsFile.replace(/^~/, process.env.HOME ?? '~'));
+      if (!fs.existsSync(p)) fail(`instructions file not found: ${p}`);
+      instructions = fs.readFileSync(p, 'utf8');
+    }
+
+    let dependsOn: string | null = null;
+    if (opts.after) {
+      const dep = getTask(opts.after);
+      if (!dep) fail(`--after: no task matching ${opts.after}`);
+      dependsOn = dep!.id;
+    }
+    let resumeSessionId: string | null = null;
+    if (opts.continueFrom) {
+      const src = getTask(opts.continueFrom);
+      if (!src) fail(`--continue-from: no task matching ${opts.continueFrom}`);
+      resumeSessionId = successfulSessionId(src!.id);
+      if (!resumeSessionId) fail(`--continue-from: task ${opts.continueFrom} has no successful run with a session id`);
+    }
 
     let scheduleKind: 'explicit' | 'spare_capacity' | 'asap' = 'asap';
     let scheduleAt: string | null = null;
@@ -95,8 +141,18 @@ program
       priority: parseInt(opts.priority, 10),
       maxAttempts: parseInt(opts.maxAttempts, 10),
       budgetUsdCap: opts.budgetUsd ? parseFloat(opts.budgetUsd) : null,
+      account: opts.account ?? null,
+      dependsOn,
+      sameSession: Boolean(opts.sameSession),
+      instructions,
+      resumeSessionId,
+      profileId: profile?.id ?? null,
+      branchMode: opts.branch === false ? 'none' : 'auto',
     });
-    console.log(`Queued task ${id.slice(0, 8)} (${scheduleKind}${scheduleAt ? ` @ ${scheduleAt}` : ''})`);
+    console.log(
+      `Queued task ${id.slice(0, 8)} (${scheduleKind}${scheduleAt ? ` @ ${scheduleAt}` : ''}` +
+        `${opts.account ? `, account=${opts.account}` : ''}${dependsOn ? `, after ${dependsOn.slice(0, 8)}` : ''})`
+    );
     if (opts.permissionMode === 'full_bypass') {
       console.log('  note: full_bypass skips ALL permission checks — use only in repos you fully trust.');
     }
@@ -135,10 +191,15 @@ program
       for (const r of runs) {
         console.log(
           `  #${r.attempt_number} ${r.outcome ?? 'running'} started=${r.started_at}` +
+            (r.account ? ` account=${r.account}` : '') +
             (r.cost_usd != null ? ` cost=$${r.cost_usd}${r.cost_usd_estimated ? ' (est)' : ''}` : '') +
             (r.rate_limit_message ? ` rate_limit="${r.rate_limit_message}"` : '') +
             (r.error_message ? ` error="${String(r.error_message).slice(0, 120)}"` : '')
         );
+        if (r.git_branch) {
+          console.log(`     changes on branch ${r.git_branch} (worktree: ${r.worktree_path})`);
+          console.log(`     review: cd ${t!.project_dir} && git diff main...${r.git_branch}`);
+        }
       }
     }
   });
@@ -163,6 +224,111 @@ program
     if (!t) fail(`no task matching ${id}`);
     const result = await executeTask(t!, (m) => console.log(m));
     console.log(`Outcome: ${result.outcomeKind}`);
+  });
+
+const account = program
+  .command('account')
+  .description('Manage multiple accounts (separate subscriptions, e.g. work + personal)');
+
+account
+  .command('add <name>')
+  .description('Register an account with an isolated config dir (then: spareloop account login <name>)')
+  .requiredOption('--tool <tool>', 'claude | codex')
+  .action((name, opts) => {
+    if (opts.tool !== 'claude' && opts.tool !== 'codex')
+      fail('multi-account currently supports claude and codex (Cursor has no verified config-dir override)');
+    const acct = addAccount(name, opts.tool);
+    console.log(`Account "${acct.name}" registered (${acct.tool}, config dir ${acct.config_dir}).`);
+    console.log(`Sign in with: spareloop account login ${acct.name}`);
+    console.log('Note: use accounts you legitimately own — separate work/personal subscriptions.');
+  });
+
+account
+  .command('login <name>')
+  .description('Interactive sign-in for a registered account')
+  .action((name) => {
+    const acct = getAccount(name);
+    if (!acct) fail(`no account named ${name}`);
+    const { bin, args } = loginCommand(acct!);
+    console.log(`Launching ${bin} ${args.join(' ')} for account "${name}"...`);
+    const child = spawn(bin, args, {
+      stdio: 'inherit',
+      env: { ...process.env, ...envForAccount(acct!) },
+    });
+    child.on('close', (code) => process.exit(code ?? 0));
+  });
+
+account
+  .command('list')
+  .action(() => {
+    const accts = listAccounts();
+    if (accts.length === 0)
+      return console.log('No accounts registered. Tasks use your default login.\nAdd one: spareloop account add work --tool claude');
+    for (const a of accts) {
+      console.log(`${a.name.padEnd(16)} ${a.tool.padEnd(7)} route-order=${a.route_order}  ${a.config_dir}`);
+    }
+  });
+
+account
+  .command('rm <name>')
+  .description('Unregister an account (credentials on disk are left untouched)')
+  .action((name) => {
+    removeAccount(name);
+    console.log(`Removed account "${name}" from spareloop. Its config dir was NOT deleted.`);
+  });
+
+const profileCmd = program.command('profile').description('Reusable task presets (tool + dir + account + instructions)');
+
+profileCmd
+  .command('add <name>')
+  .requiredOption('--tool <tool>', 'claude | codex | cursor')
+  .requiredOption('--dir <path>', 'project directory')
+  .option('--model <model>')
+  .option('--permission-mode <mode>', 'allowlist | full_bypass', 'allowlist')
+  .option('--account <name>', 'account name or "auto"')
+  .option('--instructions <text>', 'standing directions for every task using this profile')
+  .option('--instructions-file <path>')
+  .action((name, opts) => {
+    if (!isToolName(opts.tool)) fail(`unknown tool: ${opts.tool}`);
+    let instructions = opts.instructions ?? null;
+    if (opts.instructionsFile) {
+      instructions = fs.readFileSync(path.resolve(opts.instructionsFile), 'utf8');
+    }
+    const dir = path.resolve(opts.dir.replace(/^~/, process.env.HOME ?? '~'));
+    if (!fs.existsSync(dir)) fail(`project dir does not exist: ${dir}`);
+    if (opts.account && opts.account !== 'auto' && !getAccount(opts.account))
+      fail(`no account named ${opts.account}`);
+    addProfile({
+      name,
+      tool: opts.tool,
+      projectDir: dir,
+      model: opts.model ?? null,
+      permissionMode: opts.permissionMode,
+      account: opts.account ?? null,
+      instructions,
+    });
+    console.log(`Profile "${name}" saved. Use it: spareloop add --profile ${name} --prompt "..."`);
+  });
+
+profileCmd
+  .command('list')
+  .action(() => {
+    const profiles = listProfiles();
+    if (profiles.length === 0) return console.log('No profiles saved.');
+    for (const p of profiles) {
+      console.log(
+        `${p.name.padEnd(16)} ${p.tool.padEnd(7)} ${p.project_dir}` +
+          `${p.account ? `  account=${p.account}` : ''}${p.model ? `  model=${p.model}` : ''}` +
+          `${p.instructions ? '  [instructions]' : ''}`
+      );
+    }
+  });
+
+profileCmd
+  .command('rm <name>')
+  .action((name) => {
+    removeProfile(name);
+    console.log(`Removed profile "${name}".`);
   });
 
 const daemon = program.command('daemon').description('Manage the background scheduler');

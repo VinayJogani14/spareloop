@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import { getDb, kvGet, kvSet } from '../core/db';
 import { daemonLogPath } from '../core/paths';
 import { allAdapters, getAdapter, rollingWindowAdapters } from '../adapters/registry';
-import { insertUsageEvents, insertTask, listTasks, TaskRow, updateTaskStatus } from '../core/repo';
+import { getTask, insertUsageEvents, insertTask, listTasks, TaskRow, updateTaskStatus } from '../core/repo';
 import { assessCapacity } from '../core/scheduler/capacityPlanner';
 import { detectDailyWindow } from '../core/patterns/windowDetector';
 import { computePrewarm, getPrewarmConfig, reconcilePrewarmTime, setPrewarmConfig } from '../core/patterns/prewarmComputer';
@@ -15,6 +15,8 @@ const PATTERN_RECOMPUTE_INTERVAL_MS = 60 * 60 * 1000; // hourly
 const inFlight = new Map<string, Promise<unknown>>();
 /** Task ids currently executing in THIS process (excluded from orphan reaping). */
 const inFlightTaskIds = new Set<string>();
+/** Project dirs with a task currently executing — never two tasks in one repo. */
+const inFlightDirs = new Set<string>();
 
 export function log(msg: string): void {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -184,15 +186,40 @@ function schedulePrewarmTasks(now: Date): void {
   }
 }
 
+/**
+ * Chain gating: a task with a dependency runs only after it succeeds, waits
+ * while it's pending/running/rate-limited, and is cancelled if it terminally
+ * failed (running "fix the tests" after "the migration failed" helps nobody).
+ */
+export type DepGate = 'run' | 'wait' | 'cancel';
+export function dependencyGate(depStatus: TaskRow['status'] | null): DepGate {
+  if (depStatus === null || depStatus === 'succeeded') return 'run';
+  if (depStatus === 'failed' || depStatus === 'cancelled' || depStatus === 'expired') return 'cancel';
+  return 'wait';
+}
+
 async function launchEligible(now: Date): Promise<void> {
   const queued = listTasks({ status: 'queued' }).sort(
     (a, b) => b.priority - a.priority || a.created_at.localeCompare(b.created_at)
   );
 
   const launchedTools = new Set<string>();
+  const launchedDirs = new Set<string>();
   for (const task of queued) {
     if (inFlight.has(task.tool) || launchedTools.has(task.tool)) continue;
+    if (inFlightDirs.has(task.project_dir) || launchedDirs.has(task.project_dir)) continue;
     if (task.not_before && new Date(task.not_before) > now) continue;
+
+    if (task.depends_on) {
+      const dep = getTask(task.depends_on);
+      const gate = dependencyGate(dep ? dep.status : 'failed');
+      if (gate === 'cancel') {
+        updateTaskStatus(task.id, 'cancelled');
+        log(`task ${task.id.slice(0, 8)} cancelled: dependency ${task.depends_on.slice(0, 8)} ${dep?.status ?? 'missing'}`);
+        continue;
+      }
+      if (gate === 'wait') continue;
+    }
 
     let eligible = false;
     if (task.schedule_kind === 'explicit') {
@@ -213,12 +240,15 @@ async function launchEligible(now: Date): Promise<void> {
     if (!eligible) continue;
 
     launchedTools.add(task.tool);
+    launchedDirs.add(task.project_dir);
     inFlightTaskIds.add(task.id);
+    inFlightDirs.add(task.project_dir);
     const p = executeTask(task, log)
       .catch((err) => log(`executor crashed for task ${task.id.slice(0, 8)}: ${(err as Error).message}`))
       .finally(() => {
         inFlight.delete(task.tool);
         inFlightTaskIds.delete(task.id);
+        inFlightDirs.delete(task.project_dir);
       });
     inFlight.set(task.tool, p);
   }

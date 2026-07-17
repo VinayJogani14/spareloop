@@ -7,6 +7,8 @@ export interface ToolCapabilities {
   reportsDollarCost: boolean;
   /** Tool reports token counts in headless output. */
   reportsTokens: boolean;
+  /** Tool can resume a previous session by id in headless mode. */
+  supportsSessionResume: boolean;
 }
 
 export type PermissionMode = 'allowlist' | 'full_bypass';
@@ -19,6 +21,10 @@ export interface RunOptions {
   extraArgs?: string[];
   budgetUsdCap?: number;
   timeoutMs?: number;
+  /** Extra environment (e.g. CLAUDE_CONFIG_DIR for account isolation). */
+  env?: Record<string, string>;
+  /** Resume this prior session instead of starting fresh (capability-gated). */
+  resumeSessionId?: string;
 }
 
 export interface RunMetrics {
@@ -64,6 +70,8 @@ export interface NewUsageEvent {
   rateLimitHit: boolean;
   rateLimitResetAt: string | null;
   rawRef: string | null;
+  /** spareloop-managed account name; null = the user's default login. */
+  account?: string | null;
 }
 
 export interface CliAdapter {

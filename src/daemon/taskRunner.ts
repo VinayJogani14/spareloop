@@ -5,36 +5,81 @@ import {
   finishRun,
   insertRun,
   insertUsageEvents,
+  successfulSessionId,
   TaskRow,
   updateTaskStatus,
 } from '../core/repo';
 import { coolOffMsForUnparseableReset } from '../adapters/resetParser';
+import { envForAccount } from '../core/accounts';
+import { routeAccount } from '../core/scheduler/accountRouter';
+import { prepareWorkspace } from '../core/git';
+import { getDb } from '../core/db';
 
 export interface LaunchResult {
   runId: string;
-  outcomeKind: 'success' | 'failure' | 'rate_limited' | 'timeout';
+  outcomeKind: 'success' | 'failure' | 'rate_limited' | 'timeout' | 'skipped';
+}
+
+/** Instructions preamble + task prompt -> what the agent actually receives. */
+export function buildEffectivePrompt(instructions: string | null, prompt: string): string {
+  if (!instructions || !instructions.trim()) return prompt;
+  return `${instructions.trim()}\n\n---\n\n${prompt}`;
+}
+
+/** Resolve the session to resume: explicit --continue-from beats chain --same-session. */
+export function resolveResumeSession(task: TaskRow): string | null {
+  if (task.resume_session_id) return task.resume_session_id;
+  if (task.same_session === 1 && task.depends_on) return successfulSessionId(task.depends_on);
+  return null;
 }
 
 /**
- * Execute one attempt of a task: spawn the CLI, record the run, feed the
- * unified usage timeline, and transition the task's status (including
- * automatic reschedule-after-reset on a rate-limit hit).
+ * Execute one attempt of a task: route it to an account, prepare an isolated
+ * workspace (git worktree for repos), spawn the CLI, record the run, feed the
+ * unified usage timeline, and transition the task's status.
  */
 export async function executeTask(task: TaskRow, log: (msg: string) => void): Promise<LaunchResult> {
   const adapter = getAdapter(task.tool);
+
+  const route = routeAccount(task);
+  if (route.kind === 'unavailable') {
+    // Not an attempt — the task simply isn't launchable right now.
+    log(`task ${task.id.slice(0, 8)} not launchable: ${route.reason}`);
+    return { runId: '', outcomeKind: 'skipped' };
+  }
+  const accountName = route.kind === 'account' ? route.account.name : null;
+  const env = route.kind === 'account' ? envForAccount(route.account) : undefined;
+
+  const resumeSessionId = resolveResumeSession(task);
+  if (resumeSessionId && !adapter.capabilities.supportsSessionResume) {
+    log(`task ${task.id.slice(0, 8)}: ${task.tool} cannot resume sessions headlessly; starting fresh`);
+  }
+
+  const ws = prepareWorkspace(task.id, task.project_dir, task.is_prewarm ? 'none' : task.branch_mode, log);
+
   bumpAttempt(task.id);
   const attempt = task.attempt_count + 1;
   const runId = insertRun(task.id, attempt, task.tool);
+  getDb()
+    .prepare('UPDATE task_runs SET account = ?, git_branch = ?, worktree_path = ? WHERE id = ?')
+    .run(accountName, ws.gitBranch, ws.worktreePath, runId);
   updateTaskStatus(task.id, 'running');
-  log(`task ${task.id.slice(0, 8)} attempt ${attempt}/${task.max_attempts} starting (${task.tool} in ${task.project_dir})`);
+  log(
+    `task ${task.id.slice(0, 8)} attempt ${attempt}/${task.max_attempts} starting ` +
+      `(${task.tool}${accountName ? `@${accountName}` : ''} in ${ws.runDir}` +
+      `${ws.gitBranch ? ` on ${ws.gitBranch}` : ''}${resumeSessionId ? ', resuming session' : ''})`
+  );
 
   const opts: RunOptions = {
-    prompt: task.prompt,
-    projectDir: task.project_dir,
+    prompt: buildEffectivePrompt(task.instructions, task.prompt),
+    projectDir: ws.runDir,
     model: task.model ?? undefined,
     permissionMode: task.permission_mode,
     extraArgs: task.extra_args_json ? JSON.parse(task.extra_args_json) : undefined,
     budgetUsdCap: task.budget_usd_cap ?? undefined,
+    env,
+    resumeSessionId:
+      resumeSessionId && adapter.capabilities.supportsSessionResume ? resumeSessionId : undefined,
   };
 
   const outcome = await adapter.run(opts);
@@ -50,6 +95,7 @@ export async function executeTask(task: TaskRow, log: (msg: string) => void): Pr
     outputTokens: null,
     cachedInputTokens: null,
     rawRef: null,
+    account: accountName,
   };
 
   switch (outcome.kind) {
@@ -72,7 +118,13 @@ export async function executeTask(task: TaskRow, log: (msg: string) => void): Pr
         ],
         runId
       );
-      log(`task ${task.id.slice(0, 8)} succeeded` + (outcome.metrics.costUsd != null ? ` ($${outcome.metrics.costUsd.toFixed(4)}${outcome.metrics.costUsdEstimated ? ' est' : ''})` : ''));
+      log(
+        `task ${task.id.slice(0, 8)} succeeded` +
+          (outcome.metrics.costUsd != null
+            ? ` ($${outcome.metrics.costUsd.toFixed(4)}${outcome.metrics.costUsdEstimated ? ' est' : ''})`
+            : '') +
+          (ws.gitBranch ? ` — review: git checkout ${ws.gitBranch}` : '')
+      );
       return { runId, outcomeKind: 'success' };
     }
     case 'rate_limited': {
@@ -89,9 +141,6 @@ export async function executeTask(task: TaskRow, log: (msg: string) => void): Pr
         runId
       );
       if (attempt < task.max_attempts) {
-        // Requeue with not_before pushed past the reset (plus a safety margin);
-        // when the reset time couldn't be parsed, back off 3h for a window hit
-        // or 24h for a weekly cap.
         const notBefore = outcome.resetAt
           ? new Date(outcome.resetAt.getTime() + 60_000)
           : new Date(Date.now() + coolOffMsForUnparseableReset(outcome.rawMessage));

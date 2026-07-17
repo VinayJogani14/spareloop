@@ -21,6 +21,12 @@ export interface TaskRow {
   max_attempts: number;
   attempt_count: number;
   budget_usd_cap: number | null;
+  account: string | null;
+  depends_on: string | null;
+  same_session: number;
+  instructions: string | null;
+  resume_session_id: string | null;
+  branch_mode: 'auto' | 'none';
   created_at: string;
   updated_at: string;
 }
@@ -41,6 +47,12 @@ export interface NewTask {
   priority?: number;
   maxAttempts?: number;
   budgetUsdCap?: number | null;
+  account?: string | null;
+  dependsOn?: string | null;
+  sameSession?: boolean;
+  instructions?: string | null;
+  resumeSessionId?: string | null;
+  branchMode?: 'auto' | 'none';
 }
 
 export function insertTask(t: NewTask): string {
@@ -49,10 +61,12 @@ export function insertTask(t: NewTask): string {
     .prepare(
       `INSERT INTO tasks (id, prompt, tool, project_dir, model, permission_mode, extra_args_json,
          profile_id, is_prewarm, schedule_kind, schedule_at, not_before, not_after, priority,
-         max_attempts, budget_usd_cap)
+         max_attempts, budget_usd_cap, account, depends_on, same_session, instructions,
+         resume_session_id, branch_mode)
        VALUES (@id, @prompt, @tool, @projectDir, @model, @permissionMode, @extraArgs,
          @profileId, @isPrewarm, @scheduleKind, @scheduleAt, @notBefore, @notAfter, @priority,
-         @maxAttempts, @budgetUsdCap)`
+         @maxAttempts, @budgetUsdCap, @account, @dependsOn, @sameSession, @instructions,
+         @resumeSessionId, @branchMode)`
     )
     .run({
       id,
@@ -71,8 +85,25 @@ export function insertTask(t: NewTask): string {
       priority: t.priority ?? 0,
       maxAttempts: t.maxAttempts ?? 3,
       budgetUsdCap: t.budgetUsdCap ?? null,
+      account: t.account ?? null,
+      dependsOn: t.dependsOn ?? null,
+      sameSession: t.sameSession ? 1 : 0,
+      instructions: t.instructions ?? null,
+      resumeSessionId: t.resumeSessionId ?? null,
+      branchMode: t.branchMode ?? 'auto',
     });
   return id;
+}
+
+/** Session id from a task's most recent successful run (for chains/resume). */
+export function successfulSessionId(taskId: string): string | null {
+  const row = getDb()
+    .prepare(
+      `SELECT session_id FROM task_runs WHERE task_id = ? AND outcome = 'success'
+         AND session_id IS NOT NULL ORDER BY started_at DESC LIMIT 1`
+    )
+    .get(taskId) as { session_id: string } | undefined;
+  return row?.session_id ?? null;
 }
 
 export function getTask(id: string): TaskRow | undefined {
@@ -172,8 +203,8 @@ export function insertUsageEvents(events: NewUsageEvent[], taskRunId?: string): 
   const stmt = getDb().prepare(
     `INSERT INTO usage_events (id, tool, source, occurred_at, session_id, task_run_id,
        cost_usd, cost_usd_estimated, input_tokens, output_tokens, cached_input_tokens,
-       rate_limit_hit, rate_limit_reset_at, raw_ref)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       rate_limit_hit, rate_limit_reset_at, raw_ref, account)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const insertAll = getDb().transaction((evts: NewUsageEvent[]) => {
     for (const e of evts) {
@@ -191,7 +222,8 @@ export function insertUsageEvents(events: NewUsageEvent[], taskRunId?: string): 
         e.cachedInputTokens,
         e.rateLimitHit ? 1 : 0,
         e.rateLimitResetAt,
-        e.rawRef
+        e.rawRef,
+        e.account ?? null
       );
     }
   });
@@ -218,10 +250,23 @@ export function usageEventsSince(tool: ToolName, sinceIso: string): UsageEventRo
     .all(tool, sinceIso) as UsageEventRow[];
 }
 
-export function latestRateLimit(tool: ToolName): UsageEventRow | undefined {
+/**
+ * Latest rate-limit hit for a tool, optionally scoped to one account.
+ * account === null matches events from the default (non-spareloop-managed)
+ * login, which is where interactive-session hits land.
+ */
+export function latestRateLimit(tool: ToolName, account?: string | null): UsageEventRow | undefined {
+  if (account === undefined) {
+    return getDb()
+      .prepare(
+        'SELECT * FROM usage_events WHERE tool = ? AND rate_limit_hit = 1 ORDER BY occurred_at DESC LIMIT 1'
+      )
+      .get(tool) as UsageEventRow | undefined;
+  }
   return getDb()
     .prepare(
-      'SELECT * FROM usage_events WHERE tool = ? AND rate_limit_hit = 1 ORDER BY occurred_at DESC LIMIT 1'
+      `SELECT * FROM usage_events WHERE tool = ? AND rate_limit_hit = 1
+         AND account IS ? ORDER BY occurred_at DESC LIMIT 1`
     )
-    .get(tool) as UsageEventRow | undefined;
+    .get(tool, account) as UsageEventRow | undefined;
 }

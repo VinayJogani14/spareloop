@@ -26,10 +26,12 @@ export class ClaudeAdapter implements RollingWindowAdapter {
     hasRollingWindow: true,
     reportsDollarCost: true,
     reportsTokens: true,
+    supportsSessionResume: true,
   };
 
   buildArgs(opts: RunOptions): string[] {
     const args = ['-p', opts.prompt, '--output-format', 'json'];
+    if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
     if (opts.model) args.push('--model', opts.model);
     if (opts.permissionMode === 'full_bypass') {
       args.push('--dangerously-skip-permissions');
@@ -50,7 +52,8 @@ export class ClaudeAdapter implements RollingWindowAdapter {
       this.buildArgs(opts),
       opts.projectDir,
       runId,
-      opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+      opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      opts.env
     );
 
     if (res.timedOut) return { kind: 'timeout', stdoutLogPath: res.stdoutLogPath };

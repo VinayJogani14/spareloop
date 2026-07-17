@@ -1,7 +1,32 @@
 import Database from 'better-sqlite3';
 import { dbPath, ensureDirs } from './paths';
 
-const SCHEMA_VERSION = 1;
+const MIGRATION_V2 = `
+CREATE TABLE IF NOT EXISTS accounts (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL UNIQUE,
+  tool        TEXT NOT NULL CHECK (tool IN ('claude','codex')),
+  config_dir  TEXT NOT NULL,
+  route_order INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+ALTER TABLE tasks ADD COLUMN account TEXT;
+ALTER TABLE tasks ADD COLUMN depends_on TEXT REFERENCES tasks(id);
+ALTER TABLE tasks ADD COLUMN same_session INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN instructions TEXT;
+ALTER TABLE tasks ADD COLUMN resume_session_id TEXT;
+ALTER TABLE tasks ADD COLUMN branch_mode TEXT NOT NULL DEFAULT 'auto';
+
+ALTER TABLE task_runs ADD COLUMN account TEXT;
+ALTER TABLE task_runs ADD COLUMN git_branch TEXT;
+ALTER TABLE task_runs ADD COLUMN worktree_path TEXT;
+
+ALTER TABLE usage_events ADD COLUMN account TEXT;
+
+ALTER TABLE profiles ADD COLUMN account TEXT;
+ALTER TABLE profiles ADD COLUMN instructions TEXT;
+`;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS profiles (
@@ -135,6 +160,9 @@ CREATE TABLE IF NOT EXISTS kv_state (
 );
 `;
 
+/** Ordered migrations; index i applies when user_version < i+1. */
+const MIGRATIONS: string[] = [SCHEMA, MIGRATION_V2];
+
 let _db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
@@ -142,10 +170,11 @@ export function getDb(): Database.Database {
   ensureDirs();
   _db = new Database(dbPath());
   _db.pragma('journal_mode = WAL');
-  const version = _db.pragma('user_version', { simple: true }) as number;
-  if (version < SCHEMA_VERSION) {
-    _db.exec(SCHEMA);
-    _db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  let version = _db.pragma('user_version', { simple: true }) as number;
+  while (version < MIGRATIONS.length) {
+    _db.exec(MIGRATIONS[version]);
+    version += 1;
+    _db.pragma(`user_version = ${version}`);
   }
   return _db;
 }
