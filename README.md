@@ -6,12 +6,15 @@
 
 **The scheduler + optimizer for Claude Code, Codex CLI, and Cursor: queue work into your spare capacity, learn your daily rhythm, and shift your usage window so resets land exactly when you need them.**
 
+[![CI](https://github.com/VinayJogani14/spareloop/actions/workflows/ci.yml/badge.svg)](https://github.com/VinayJogani14/spareloop/actions/workflows/ci.yml)
 [![GitHub Stars](https://img.shields.io/github/stars/VinayJogani14/spareloop?style=flat&logo=github)](https://github.com/VinayJogani14/spareloop/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen?logo=node.js&logoColor=white)](package.json)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-blueviolet.svg)](CONTRIBUTING.md)
 
-[Quick Start](#-quick-start) · [The Prewarm Trick](#-the-prewarm-trick) · [Queue](#-queue-tasks-into-spare-capacity) · [Multi-Account](#-multiple-accounts) · [Chains & Sessions](#-task-chains--session-continuity) · [Safety](#-safety-model) · [Roadmap](#-roadmap)
+[Quick Start](#-quick-start) · [The Prewarm Trick](#-the-prewarm-trick) · [Queue](#-queue-tasks-into-spare-capacity) · [Multi-Account](#-multiple-accounts) · [Chains & Sessions](#-task-chains--session-continuity) · [Safety](#-safety-model) · [vs. Alternatives](#-vs-alternatives) · [Roadmap](#-roadmap)
+
+![spareloop demo: suggest, predict, and stats commands running against real usage history](demo/demo.gif)
 
 </div>
 
@@ -189,6 +192,24 @@ spareloop status --tool <t>             one-line status for statusLine/tmux/prom
 spareloop suggest [--verbose]           pattern analysis + recommendations
 spareloop prewarm enable|disable|status
 ```
+
+## ⚔️ vs. Alternatives
+
+There's a great ecosystem of tools around this problem already — spareloop exists because each one solves one piece, and none closes the loop:
+
+|                                  | [ccusage](https://github.com/ryoppippi/ccusage) | [Claude-Code-Usage-Monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) | [claude-queue](https://github.com/vasiliyk/claude-queue) | **spareloop** |
+|----------------------------------|:---:|:---:|:---:|:---:|
+| Parses local usage/session logs  | ✅ | ✅ | — | ✅ |
+| Live burn-rate & ETA prediction  | — | ✅ | — | ✅ |
+| Queue tasks to run unattended    | — | — | ✅ | ✅ |
+| Auto-pause/resume on rate limit  | — | — | ✅ | ✅ |
+| **Learns your daily rhythm & prewarms your window** | — | — | — | ✅ |
+| Multi-account routing            | — | — | — | ✅ |
+| Task chains + session resume     | — | — | — | ✅ |
+| Auto-branch isolation (git worktree) | — | — | — | ✅ |
+| Multi-tool (Claude / Codex / Cursor) | Claude only | Claude only | Claude only | ✅ |
+
+ccusage and the usage monitors tell you what happened; claude-queue lets you queue work. spareloop is the loop: it watches usage, learns your pattern, prewarms your window, and queues work into the capacity that would otherwise evaporate — across every tool you use.
 
 ## 🗺️ Roadmap
 

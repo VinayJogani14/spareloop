@@ -33,7 +33,7 @@ const program = new Command();
 program
   .name('spareloop')
   .description('Queue AI-CLI tasks for spare usage capacity, learn your daily window pattern, and prewarm resets so they land when you need them.')
-  .version('0.1.0');
+  .version('0.3.0');
 
 program
   .command('init')

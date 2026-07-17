@@ -29,6 +29,22 @@ Rules of the codebase:
 - **The daemon must never crash on bad input.** Parsers are defensive; logging never throws.
 - Tests use `SPARELOOP_HOME` pointed at a temp dir. Tests must not spawn real AI CLIs.
 
+## Regenerating the README demo GIF
+
+`demo/demo.gif` is auto-generated with [vhs](https://github.com/charmbracelet/vhs) against a
+seeded, synthetic dataset — no manual screen recording, and no real user data:
+
+```bash
+brew install vhs   # or see vhs install docs for your platform
+npm run build
+node demo/seed.js demo/.demo-home
+SPARELOOP_REPO_DIR=$(pwd) vhs demo/demo.tape
+```
+
+`demo/seed.js` never runs `daemon tick`/log ingestion — that would pull in the real
+`~/.claude` session logs on whatever machine renders it. It precomputes the pattern
+directly from the synthetic events instead, so the output is reproducible.
+
 ## Pull requests
 
 - One focused change per PR, with a test where behavior changed.
