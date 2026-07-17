@@ -1,0 +1,49 @@
+{
+  "name": "spareloop",
+  "version": "0.1.0",
+  "description": "Stop wasting your AI coding CLI usage windows. Queue tasks for spare capacity, learn your daily usage pattern, and prewarm your rolling window so resets land when you need them. Works with Claude Code, Codex CLI, and Cursor.",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "cursor",
+    "ai-agents",
+    "task-queue",
+    "scheduler",
+    "usage-limits",
+    "rate-limits",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": "Vinay Jogani",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VinayJogani14/spareloop.git"
+  },
+  "bin": {
+    "spareloop": "./dist/src/cli/index.js"
+  },
+  "main": "./dist/src/cli/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
