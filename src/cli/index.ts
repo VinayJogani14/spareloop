@@ -23,6 +23,9 @@ import { readDaemonPid, runDaemon, runSingleTick } from '../daemon/index';
 import { successfulSessionId } from '../core/repo';
 import { addAccount, envForAccount, getAccount, listAccounts, loginCommand, removeAccount } from '../core/accounts';
 import { addProfile, getProfile, listProfiles, removeProfile } from '../core/profiles';
+import { predictWindow, predictWeekly } from '../core/patterns/predictor';
+import { computeHeatmap, computeWasteReport, renderHeatmapAscii } from '../core/patterns/heatmap';
+import { renderOneLine } from '../core/statusLine';
 import { detectBackend, install, uninstall, Backend } from '../daemon/installers/index';
 import { executeTask } from '../daemon/taskRunner';
 
@@ -496,6 +499,79 @@ program
       }
     }
     console.log('\nCursor — monthly credit pool; no rolling-window pattern applies (run counts tracked, see: spareloop usage --tool cursor)');
+  });
+
+program
+  .command('predict')
+  .description('Forecast when you\'ll hit your window (and rough weekly pace)')
+  .option('--tool <tool>')
+  .action((opts) => {
+    const tools = opts.tool ? [opts.tool] : ['claude', 'codex'];
+    for (const tool of tools) {
+      if (!isToolName(tool)) continue;
+      if (!getAdapter(tool).capabilities.hasRollingWindow) continue;
+      const label = tool === 'claude' ? 'Claude Code' : 'Codex CLI';
+      const w = predictWindow(tool);
+      console.log(`\n${label}`);
+      if (!w.hasData) {
+        console.log(`  ${w.reason}`);
+      } else if (w.etaMinutes == null) {
+        console.log(`  ${w.reason}`);
+      } else if (w.etaMinutes === 0) {
+        console.log(`  ⚠ ${w.reason}`);
+      } else {
+        const eta = new Date(w.etaAt!);
+        console.log(`  ${w.reason}`);
+        console.log(`  Projected wall: ~${eta.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (confidence ${confidenceWord(w.confidence)})`);
+      }
+      const weekly = predictWeekly(tool);
+      if (weekly.hasData && weekly.projectedWeekCostUsd != null) {
+        console.log(
+          `  Weekly pace: $${(weekly.costUsdSoFar ?? 0).toFixed(2)} so far -> projected ~$${weekly.projectedWeekCostUsd.toFixed(2)} by week's end (naive same-pace projection)`
+        );
+      }
+    }
+  });
+
+program
+  .command('stats')
+  .description('Peak/quiet-hour heatmap and a waste report (unused window-hours, dead-zone hours lost)')
+  .option('--tool <tool>')
+  .option('--days <n>', 'lookback days', '21')
+  .action((opts) => {
+    const tools = opts.tool ? [opts.tool] : ['claude', 'codex', 'cursor'];
+    for (const tool of tools) {
+      if (!isToolName(tool)) continue;
+      const hm = computeHeatmap(tool, parseInt(opts.days, 10));
+      const totalEvents = hm.cells.flat().reduce((s, c) => s + c.events, 0);
+      console.log(`\n${tool} — usage heatmap (${hm.lookbackDays}-day lookback, ${totalEvents} events)`);
+      if (totalEvents === 0) {
+        console.log('  No usage recorded yet.');
+        continue;
+      }
+      console.log(renderHeatmapAscii(hm));
+      if (hm.peakHour) {
+        console.log(`  Peak hour: ${String(hm.peakHour.hour).padStart(2, '0')}:00 (${hm.peakHour.tokens.toLocaleString()} tokens)`);
+      }
+      if (hm.quietHours.length > 0) {
+        console.log(`  Quiet hours: ${hm.quietHours.map((h) => `${String(h).padStart(2, '0')}:00`).join(', ')}`);
+      }
+      const waste = computeWasteReport(tool, 7);
+      console.log(
+        `  Waste report (last ${waste.lookbackDays}d): ${waste.windowHoursUnused}h of ${waste.windowHoursAvailable}h unused` +
+          (waste.deadZoneHoursLost > 0 ? `, ~${waste.deadZoneHoursLost.toFixed(1)}h/week lost to dead zones` : '')
+      );
+    }
+  });
+
+program
+  .command('status')
+  .description('Compact status line (for Claude Code statusLine, tmux, or a shell prompt)')
+  .requiredOption('--tool <tool>', 'claude | codex | cursor')
+  .option('--oneline', 'force single-line output (default)')
+  .action((opts) => {
+    if (!isToolName(opts.tool)) fail(`unknown tool: ${opts.tool}`);
+    console.log(renderOneLine(opts.tool));
   });
 
 const prewarm = program.command('prewarm').description('Manage window-prewarm scheduling');

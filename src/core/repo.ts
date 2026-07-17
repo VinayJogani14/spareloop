@@ -242,6 +242,7 @@ export interface UsageEventRow {
   input_tokens: number | null;
   output_tokens: number | null;
   raw_ref: string | null;
+  account: string | null;
 }
 
 export function usageEventsSince(tool: ToolName, sinceIso: string): UsageEventRow[] {

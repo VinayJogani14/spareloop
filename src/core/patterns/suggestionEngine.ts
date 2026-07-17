@@ -3,9 +3,17 @@ import { getDb } from '../db';
 import { WindowPattern } from './windowDetector';
 import { computePrewarm, getPrewarmConfig } from './prewarmComputer';
 import { listTasks } from '../repo';
+import { computeHeatmap } from './heatmap';
+import { predictWeekly } from './predictor';
 
 export interface Suggestion {
-  kind: 'queue_into_dead_zone' | 'enable_prewarm' | 'adjust_prewarm_time' | 'none_stable';
+  kind:
+    | 'queue_into_dead_zone'
+    | 'enable_prewarm'
+    | 'adjust_prewarm_time'
+    | 'none_stable'
+    | 'route_to_peak_gap'
+    | 'weekly_pace_warning';
   tool: string;
   message: string;
   proposedPrewarmLocal: string | null;
@@ -58,6 +66,31 @@ export function generateSuggestions(pattern: WindowPattern): Suggestion[] {
         (spareTasks.length > 0
           ? ` — ${spareTasks.length} queued task(s) will drain into it automatically.`
           : `. Queue backlog tasks with: spareloop add --spare-capacity`),
+      proposedPrewarmLocal: null,
+    });
+  }
+
+  const heatmap = computeHeatmap(pattern.tool, 21);
+  if (heatmap.peakHour && heatmap.quietHours.length > 0) {
+    const peakLabel = `${String(heatmap.peakHour.hour).padStart(2, '0')}:00`;
+    const quietLabel = heatmap.quietHours
+      .slice(0, 3)
+      .map((h) => `${String(h).padStart(2, '0')}:00`)
+      .join(', ');
+    out.push({
+      kind: 'route_to_peak_gap',
+      tool: pattern.tool,
+      message: `Your peak usage hour is ${peakLabel}; quietest hours are ${quietLabel} (near-zero usage). Schedule heavy queued work at the quiet hours to keep peak-hour capacity free for interactive use.`,
+      proposedPrewarmLocal: null,
+    });
+  }
+
+  const weekly = predictWeekly(pattern.tool);
+  if (weekly.hasData && weekly.projectedWeekCostUsd != null && weekly.fractionOfWeekElapsed < 0.9) {
+    out.push({
+      kind: 'weekly_pace_warning',
+      tool: pattern.tool,
+      message: `At this week's pace you're projected to reach ~$${weekly.projectedWeekCostUsd.toFixed(2)} by week's end (~$${(weekly.costUsdSoFar ?? 0).toFixed(2)} so far, ${Math.round(weekly.fractionOfWeekElapsed * 100)}% of the week elapsed). This is a naive same-pace projection, not a calibrated weekly-cap ETA.`,
       proposedPrewarmLocal: null,
     });
   }

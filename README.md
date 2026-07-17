@@ -146,6 +146,33 @@ Letting an agent work while you sleep requires trust. spareloop's defaults are b
 
 > **Status:** Claude Code adapter validated end-to-end against the real binary. **Codex and Cursor adapters are experimental** — built against current documented flags but not yet exercised on real installs. Running one? Rate-limit message reports are the most valuable contribution you can make.
 
+## 🔮 Predict, Stats & Status
+
+```bash
+$ spareloop predict
+Claude Code
+  at your current pace (~340 tok/min), you'll reach your typical exhaustion
+  point in ~52 min
+  Projected wall: ~12:14 PM (confidence high)
+  Weekly pace: $4.12 so far -> projected ~$9.80 by week's end
+
+$ spareloop stats --tool claude
+claude — usage heatmap (21-day lookback, 12196 events)
+     012345678901234567890123
+Mon
+Tue             =+  .   ..
+Wed                 . .-  .
+...
+  Peak hour: 20:00 (1,131,680 tokens)
+  Quiet hours: 01:00, 02:00, ..., 07:00
+  Waste report (last 7d): 112h of 192h unused, ~35.7h/week lost to dead zones
+
+$ spareloop status --tool claude   # embed in Claude Code's statusLine, tmux, or a shell prompt
+spareloop[claude] ▮▮▮▮▮▮▮▯▯▯ 68% · ~wall 12:14 PM · 2 queued
+```
+
+Threshold alerts (50/75/90% of your typical exhaustion budget) fire as OS notifications automatically once the daemon is running — no flag needed. Task completions/failures notify too.
+
 ## 📟 All Commands
 
 ```
@@ -156,6 +183,9 @@ spareloop account add|login|list|rm     multi-account management
 spareloop profile add|list|rm           reusable task presets
 spareloop daemon install|start|stop|status|logs|pause|resume
 spareloop usage [--tool] [--days]       unified usage history
+spareloop predict [--tool]              burn-rate ETA + weekly pace
+spareloop stats [--tool] [--days]       peak/quiet-hour heatmap + waste report
+spareloop status --tool <t>             one-line status for statusLine/tmux/prompt
 spareloop suggest [--verbose]           pattern analysis + recommendations
 spareloop prewarm enable|disable|status
 ```
@@ -164,9 +194,9 @@ spareloop prewarm enable|disable|status
 
 - [x] Queue + daemon + prewarm + pattern learning (v0.1)
 - [x] Multi-account routing, task chains, session continuity, worktree isolation, profiles (v0.2)
-- [ ] `spareloop predict` — live burn rate → "you hit the wall at 12:40pm"
-- [ ] `spareloop stats` — peak/down hours heatmap + waste report
-- [ ] Threshold alerts (50/75/90%) + OS notifications + status-line integration
+- [x] `spareloop predict` — live burn rate → "you hit the wall at 12:40pm" (v0.3)
+- [x] `spareloop stats` — peak/down hours heatmap + waste report (v0.3)
+- [x] Threshold alerts (50/75/90%) + OS notifications + status-line integration (v0.3)
 - [ ] Morning report: what ran overnight, diffs, costs
 - [ ] Memory providers (OpenMemory/Mem0, Supermemory, Zep, Letta via MCP)
 - [ ] Webhooks (Slack/Discord), CSV/JSON export, Windows support

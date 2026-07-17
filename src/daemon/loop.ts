@@ -7,9 +7,13 @@ import { assessCapacity } from '../core/scheduler/capacityPlanner';
 import { detectDailyWindow } from '../core/patterns/windowDetector';
 import { computePrewarm, getPrewarmConfig, reconcilePrewarmTime, setPrewarmConfig } from '../core/patterns/prewarmComputer';
 import { generateSuggestions } from '../core/patterns/suggestionEngine';
+import { currentWindowSnapshot, predictWindow } from '../core/patterns/predictor';
+import { notify } from '../notify/index';
 import { executeTask } from './taskRunner';
 
 const PATTERN_RECOMPUTE_INTERVAL_MS = 60 * 60 * 1000; // hourly
+const ALERT_CHECK_INTERVAL_MS = 5 * 60 * 1000; // every 5 min
+const ALERT_THRESHOLDS = [50, 75, 90];
 
 /** In-flight task promises, keyed by tool — max one concurrent task per tool. */
 const inFlight = new Map<string, Promise<unknown>>();
@@ -36,7 +40,48 @@ export async function tick(now = new Date()): Promise<void> {
   expireOverdue(now);
   maybeRecomputePatterns(now);
   schedulePrewarmTasks(now);
+  checkBurnRateAlerts(now);
   await launchEligible(now);
+}
+
+/**
+ * Threshold alerts (50/75/90% of typical exhaustion budget), deduped per
+ * tool per window so a single crossing fires exactly one notification.
+ */
+function checkBurnRateAlerts(now: Date): void {
+  const last = kvGet('last_alert_check');
+  if (last && now.getTime() - new Date(last).getTime() < ALERT_CHECK_INTERVAL_MS) return;
+  kvSet('last_alert_check', now.toISOString());
+
+  for (const adapter of rollingWindowAdapters()) {
+    const prediction = predictWindow(adapter.tool, now);
+    if (!prediction.hasData || prediction.percentOfTypicalBudget == null) continue;
+    const snapshot = currentWindowSnapshot(adapter.tool, now);
+    if (!snapshot) continue;
+
+    // Fired-thresholds set is keyed by the actual detected window start, so a
+    // new window (new first-prompt or post-reset) naturally gets a fresh set.
+    const firedKey = `alert_fired:${adapter.tool}`;
+    const windowMarkerKey = `alert_window_start:${adapter.tool}`;
+    const windowStartIso = snapshot.windowStartAt.toISOString();
+    if (kvGet(windowMarkerKey) !== windowStartIso) {
+      kvSet(windowMarkerKey, windowStartIso);
+      kvSet(firedKey, '');
+    }
+    const alreadyFired = new Set((kvGet(firedKey) ?? '').split(',').filter(Boolean));
+
+    for (const threshold of ALERT_THRESHOLDS) {
+      const label = String(threshold);
+      if (prediction.percentOfTypicalBudget >= threshold && !alreadyFired.has(label)) {
+        alreadyFired.add(label);
+        const toolLabel = adapter.tool === 'claude' ? 'Claude Code' : 'Codex CLI';
+        const msg = `${Math.round(prediction.percentOfTypicalBudget)}% of typical window usage. ${prediction.reason}`;
+        notify(`${toolLabel}: ${threshold}% burn-rate alert`, msg);
+        log(`burn-rate alert [${adapter.tool}] crossed ${threshold}%: ${msg}`);
+      }
+    }
+    kvSet(firedKey, [...alreadyFired].join(','));
+  }
 }
 
 async function ingestInteractiveUsage(): Promise<void> {

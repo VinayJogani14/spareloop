@@ -160,8 +160,24 @@ CREATE TABLE IF NOT EXISTS kv_state (
 );
 `;
 
+const MIGRATION_V3 = `
+CREATE TABLE suggestions_new (
+  id              TEXT PRIMARY KEY,
+  pattern_id      TEXT REFERENCES learned_patterns(id),
+  kind            TEXT NOT NULL,
+  tool            TEXT NOT NULL,
+  message         TEXT NOT NULL,
+  proposed_prewarm_local TEXT,
+  status          TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','shown','accepted','dismissed')),
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT INTO suggestions_new SELECT * FROM suggestions;
+DROP TABLE suggestions;
+ALTER TABLE suggestions_new RENAME TO suggestions;
+`;
+
 /** Ordered migrations; index i applies when user_version < i+1. */
-const MIGRATIONS: string[] = [SCHEMA, MIGRATION_V2];
+const MIGRATIONS: string[] = [SCHEMA, MIGRATION_V2, MIGRATION_V3];
 
 let _db: Database.Database | null = null;
 

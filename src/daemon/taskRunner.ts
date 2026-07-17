@@ -14,6 +14,7 @@ import { envForAccount } from '../core/accounts';
 import { routeAccount } from '../core/scheduler/accountRouter';
 import { prepareWorkspace } from '../core/git';
 import { getDb } from '../core/db';
+import { notify } from '../notify/index';
 
 export interface LaunchResult {
   runId: string;
@@ -125,6 +126,12 @@ export async function executeTask(task: TaskRow, log: (msg: string) => void): Pr
             : '') +
           (ws.gitBranch ? ` — review: git checkout ${ws.gitBranch}` : '')
       );
+      if (!task.is_prewarm) {
+        notify(
+          'spareloop: task succeeded',
+          `${task.prompt.slice(0, 80)}${ws.gitBranch ? ` (branch ${ws.gitBranch})` : ''}`
+        );
+      }
       return { runId, outcomeKind: 'success' };
     }
     case 'rate_limited': {
@@ -149,6 +156,7 @@ export async function executeTask(task: TaskRow, log: (msg: string) => void): Pr
       } else {
         updateTaskStatus(task.id, 'failed');
         log(`task ${task.id.slice(0, 8)} rate-limited on final attempt; marking failed`);
+        if (!task.is_prewarm) notify('spareloop: task failed (rate limited)', task.prompt.slice(0, 100));
       }
       return { runId, outcomeKind: 'rate_limited' };
     }
@@ -166,8 +174,12 @@ export async function executeTask(task: TaskRow, log: (msg: string) => void): Pr
         stdoutLogPath: outcome.stdoutLogPath,
         stderrLogPath: outcome.stderrLogPath,
       });
-      updateTaskStatus(task.id, attempt < task.max_attempts ? 'queued' : 'failed');
+      const willRetry = attempt < task.max_attempts;
+      updateTaskStatus(task.id, willRetry ? 'queued' : 'failed');
       log(`task ${task.id.slice(0, 8)} failed (exit ${outcome.exitCode}): ${outcome.errorMessage.slice(0, 200)}`);
+      if (!willRetry && !task.is_prewarm) {
+        notify('spareloop: task failed', `${task.prompt.slice(0, 80)} — ${outcome.errorMessage.slice(0, 100)}`);
+      }
       return { runId, outcomeKind: 'failure' };
     }
   }
