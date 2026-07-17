@@ -2,6 +2,7 @@ import { CliAdapter, isRollingWindowAdapter, ToolName } from '../../adapters/typ
 import { latestRateLimit } from '../repo';
 import { latestPattern, fromHHMM, minutesOfDay } from '../patterns/windowDetector';
 import { kvGet } from '../db';
+import { coolOffMsForUnparseableReset } from '../../adapters/resetParser';
 
 export type Capacity = 'available' | 'blocked' | 'likely_dead_zone';
 
@@ -45,13 +46,15 @@ export function assessCapacity(adapter: CliAdapter, now = new Date()): CapacityV
       };
     }
   } else if (lastHit) {
-    // Rate limit hit but reset time unparseable: conservative fixed cool-off.
+    // Rate limit hit but reset time unparseable: conservative fixed cool-off,
+    // longer when the message indicates a weekly cap rather than a window hit.
     const hitTime = new Date(lastHit.occurred_at);
-    const coolOffUntil = new Date(hitTime.getTime() + 3 * 3600 * 1000);
+    const coolOffMs = coolOffMsForUnparseableReset(lastHit.raw_ref ?? '');
+    const coolOffUntil = new Date(hitTime.getTime() + coolOffMs);
     if (coolOffUntil > now) {
       return {
         capacity: 'blocked',
-        reason: 'recent rate limit with unparseable reset time; conservative 3h cool-off',
+        reason: `recent rate limit with unparseable reset time; ${Math.round(coolOffMs / 3600000)}h cool-off`,
         blockedUntil: coolOffUntil,
       };
     }

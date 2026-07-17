@@ -45,3 +45,12 @@ export const RATE_LIMIT_PATTERNS: RegExp[] = [
 export function looksRateLimited(text: string): boolean {
   return RATE_LIMIT_PATTERNS.some((re) => re.test(text));
 }
+
+/**
+ * Conservative back-off when a rate-limit message's reset time couldn't be
+ * parsed. A weekly cap blocks for days — retrying in 3h would just burn
+ * attempts — while a 5h-window hit clears within hours.
+ */
+export function coolOffMsForUnparseableReset(message: string): number {
+  return /weekly/i.test(message) ? 24 * 3600 * 1000 : 3 * 3600 * 1000;
+}

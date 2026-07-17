@@ -13,6 +13,8 @@ const PATTERN_RECOMPUTE_INTERVAL_MS = 60 * 60 * 1000; // hourly
 
 /** In-flight task promises, keyed by tool — max one concurrent task per tool. */
 const inFlight = new Map<string, Promise<unknown>>();
+/** Task ids currently executing in THIS process (excluded from orphan reaping). */
+const inFlightTaskIds = new Set<string>();
 
 export function log(msg: string): void {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -27,6 +29,7 @@ export function log(msg: string): void {
 /** One scheduler pass. Runs every tick (persistent daemon) or per cron fire. */
 export async function tick(now = new Date()): Promise<void> {
   await ingestInteractiveUsage();
+  recoverOrphanedRunning(now);
   recoverRateLimited(now);
   expireOverdue(now);
   maybeRecomputePatterns(now);
@@ -47,6 +50,60 @@ async function ingestInteractiveUsage(): Promise<void> {
     } catch (err) {
       log(`ingest error for ${adapter.tool}: ${(err as Error).message}`);
     }
+  }
+}
+
+/**
+ * A task stuck in 'running' with no live executor is orphaned (daemon crash,
+ * machine died mid-run). Detected two ways:
+ *  - its latest run row already ended (crash in the tiny window between
+ *    finishRun and the task-status update), or
+ *  - its latest run started longer ago than the max run timeout plus grace
+ *    and never ended. The threshold stays above the 1h subprocess timeout so
+ *    overlapping cron ticks never reap a legitimately-running task.
+ */
+const ORPHAN_THRESHOLD_MS = 90 * 60 * 1000;
+
+function recoverOrphanedRunning(now: Date): void {
+  const rows = getDb()
+    .prepare(
+      `SELECT t.id AS task_id, t.attempt_count, t.max_attempts,
+              r.id AS run_id, r.started_at, r.ended_at
+       FROM tasks t
+       JOIN task_runs r ON r.id = (
+         SELECT id FROM task_runs WHERE task_id = t.id ORDER BY started_at DESC, rowid DESC LIMIT 1
+       )
+       WHERE t.status = 'running' AND t.id NOT IN (
+         SELECT value FROM json_each(?)
+       )`
+    )
+    .all(JSON.stringify([...inFlightTaskIds])) as Array<{
+    task_id: string;
+    attempt_count: number;
+    max_attempts: number;
+    run_id: string;
+    started_at: string;
+    ended_at: string | null;
+  }>;
+
+  for (const row of rows) {
+    const runEnded = row.ended_at != null;
+    // sqlite datetime('now') is UTC in "YYYY-MM-DD HH:MM:SS" form
+    const startedMs = Date.parse(row.started_at.replace(' ', 'T') + 'Z');
+    const stale = now.getTime() - startedMs > ORPHAN_THRESHOLD_MS;
+    if (!runEnded && !stale) continue;
+
+    if (!runEnded) {
+      getDb()
+        .prepare(
+          `UPDATE task_runs SET ended_at = datetime('now'), outcome = 'failure',
+             error_message = 'orphaned: daemon or machine died mid-run' WHERE id = ?`
+        )
+        .run(row.run_id);
+    }
+    const status = row.attempt_count < row.max_attempts ? 'queued' : 'failed';
+    updateTaskStatus(row.task_id, status);
+    log(`task ${row.task_id.slice(0, 8)} was orphaned in 'running'; ${status === 'queued' ? 're-queued' : 'marked failed (attempts exhausted)'}`);
   }
 }
 
@@ -156,9 +213,13 @@ async function launchEligible(now: Date): Promise<void> {
     if (!eligible) continue;
 
     launchedTools.add(task.tool);
+    inFlightTaskIds.add(task.id);
     const p = executeTask(task, log)
       .catch((err) => log(`executor crashed for task ${task.id.slice(0, 8)}: ${(err as Error).message}`))
-      .finally(() => inFlight.delete(task.tool));
+      .finally(() => {
+        inFlight.delete(task.tool);
+        inFlightTaskIds.delete(task.id);
+      });
     inFlight.set(task.tool, p);
   }
 }

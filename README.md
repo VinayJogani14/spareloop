@@ -88,6 +88,8 @@ spareloop usage                                  # unified cost/token/rate-limit
 
 spareloop never fabricates metrics: Codex costs are estimates from a [user-overridable pricing table](src/adapters/pricing.ts) and flagged as such in the database; Cursor runs are tracked by count only.
 
+> **Status:** the Claude Code adapter is validated end-to-end against the real binary (including live cost parsing and session-log ingestion). The **Codex and Cursor adapters are experimental** — built against current documented flags but not yet exercised against real installs. If you run either, bug reports (especially exact rate-limit message phrasings) are the single most useful contribution.
+
 ## Safety model
 
 Unattended runs default to each tool's **safe non-interactive mode** — Claude `--permission-mode dontAsk` (auto-denies anything outside your project's `permissions.allow` rules), Codex `-a never -s workspace-write` (sandboxed to the workspace), Cursor allowlist rules from `~/.cursor/cli-config.json`. Nothing prompts, nothing hangs, nothing gets silently approved.

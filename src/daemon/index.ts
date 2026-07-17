@@ -7,6 +7,14 @@ const TICK_INTERVAL_MS = 60 * 1000;
 /** Persistent daemon: tick every minute until signalled to stop. */
 export async function runDaemon(): Promise<void> {
   ensureDirs();
+  // Double-daemon guard: launchd/systemd restarts plus a manual `daemon start`
+  // must never run two schedulers (they would double-launch tasks).
+  const existing = readDaemonPid();
+  if (existing !== null && existing !== process.pid) {
+    log(`refusing to start: another daemon is already running (pid ${existing})`);
+    console.error(`spareloop daemon already running (pid ${existing}); stop it first with: spareloop daemon stop`);
+    process.exit(1);
+  }
   fs.writeFileSync(pidFilePath(), String(process.pid));
   log(`spareloop daemon started (pid ${process.pid})`);
 

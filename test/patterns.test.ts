@@ -15,7 +15,11 @@ import {
   weightedMedian,
   WindowPattern,
 } from '../src/core/patterns/windowDetector';
-import { parseResetPhrase, looksRateLimited } from '../src/adapters/resetParser';
+import {
+  parseResetPhrase,
+  looksRateLimited,
+  coolOffMsForUnparseableReset,
+} from '../src/adapters/resetParser';
 import { insertUsageEvents } from '../src/core/repo';
 import { NewUsageEvent } from '../src/adapters/types';
 
@@ -95,6 +99,12 @@ test('rate limit detection patterns', () => {
   assert.ok(looksRateLimited("You've hit your session limit · resets 3:45pm"));
   assert.ok(looksRateLimited('Claude usage limit reached'));
   assert.ok(!looksRateLimited('task completed successfully'));
+});
+
+test('unparseable-reset cool-off: 24h for weekly caps, 3h for window hits', () => {
+  assert.equal(coolOffMsForUnparseableReset("You've hit your weekly limit"), 24 * 3600 * 1000);
+  assert.equal(coolOffMsForUnparseableReset("You've hit your session limit"), 3 * 3600 * 1000);
+  assert.equal(coolOffMsForUnparseableReset('unrecognized error text'), 3 * 3600 * 1000);
 });
 
 test('detectDailyWindow reconstructs pattern from synthetic history', () => {

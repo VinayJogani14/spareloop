@@ -8,6 +8,7 @@ import {
   TaskRow,
   updateTaskStatus,
 } from '../core/repo';
+import { coolOffMsForUnparseableReset } from '../adapters/resetParser';
 
 export interface LaunchResult {
   runId: string;
@@ -84,15 +85,16 @@ export async function executeTask(task: TaskRow, log: (msg: string) => void): Pr
         stdoutLogPath: outcome.stdoutLogPath,
       });
       insertUsageEvents(
-        [{ ...usageBase, rateLimitHit: true, rateLimitResetAt: resetIso }],
+        [{ ...usageBase, rateLimitHit: true, rateLimitResetAt: resetIso, rawRef: outcome.rawMessage }],
         runId
       );
       if (attempt < task.max_attempts) {
-        // Requeue with not_before pushed past the reset (plus a safety margin),
-        // or a conservative 3h back-off when the reset time couldn't be parsed.
+        // Requeue with not_before pushed past the reset (plus a safety margin);
+        // when the reset time couldn't be parsed, back off 3h for a window hit
+        // or 24h for a weekly cap.
         const notBefore = outcome.resetAt
           ? new Date(outcome.resetAt.getTime() + 60_000)
-          : new Date(Date.now() + 3 * 3600 * 1000);
+          : new Date(Date.now() + coolOffMsForUnparseableReset(outcome.rawMessage));
         updateTaskStatus(task.id, 'rate_limited', { notBefore: notBefore.toISOString() });
         log(`task ${task.id.slice(0, 8)} rate-limited; will retry after ${notBefore.toISOString()}`);
       } else {
