@@ -177,7 +177,7 @@ spareloop watch       # live dashboard: window burn rate, queue, active tasks, r
 spareloop clean       # dry-run by default; --yes removes finished tasks' worktrees (branches untouched)
 ```
 
-## 🛡️ Safety Model
+## 🔒 Safety Model
 
 Letting an agent work while you sleep requires trust. spareloop's defaults are built for it:
 
@@ -253,7 +253,7 @@ spareloop doctor                        diagnose daemon/account/task health
 spareloop watch                         live dashboard
 ```
 
-## ⚔️ vs. Alternatives
+## 🆚 vs. Alternatives
 
 There's a great ecosystem of tools around this problem already — spareloop exists because each one solves one piece, and none closes the loop:
 
