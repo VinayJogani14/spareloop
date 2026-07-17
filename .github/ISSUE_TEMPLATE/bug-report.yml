@@ -1,0 +1,39 @@
+name: Bug report
+description: Something didn't work the way it should
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what actually happened?
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Exact command
+      placeholder: "spareloop add --tool claude ..."
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: "`spareloop daemon logs`, `spareloop doctor`, or terminal output — whatever's relevant."
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: spareloop version
+      placeholder: "spareloop --version"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true

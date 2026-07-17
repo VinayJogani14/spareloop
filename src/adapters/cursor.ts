@@ -5,13 +5,23 @@ import { spawnCapture, commandExists } from './spawn';
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 
 /**
- * Adapter for Cursor CLI headless mode (`cursor-agent -p`).
+ * Adapter for Cursor CLI headless mode (`cursor-agent -p` / `agent -p`).
  *
  * Honest about its limits: Cursor's local CLI JSON output contains NO token or
  * cost fields, and Cursor bills from a monthly credit pool rather than a
  * rolling window — so this adapter reports no metrics (never fabricates them),
  * implements no rolling-window behavior, and is excluded from prewarm logic
  * at the type level (does not implement RollingWindowAdapter).
+ *
+ * Flag surface verified against a real install (2026-07-17): `-p`,
+ * `--output-format json`, `--force`, `--trust`, and `--resume <chatId>` all
+ * pass argument parsing cleanly (checked by running each combination and
+ * confirming no "unexpected argument" error - only an expected auth-required
+ * failure, since this environment has no logged-in Cursor account). The
+ * `--resume` flag's existence is confirmed; the exact JSON field name for the
+ * resumable session id (`session_id`, assumed from the documented output
+ * shape) could NOT be confirmed end-to-end without completing an
+ * authenticated request.
  */
 export class CursorAdapter implements CliAdapter {
   readonly tool = 'cursor' as const;
@@ -20,7 +30,8 @@ export class CursorAdapter implements CliAdapter {
     hasRollingWindow: false,
     reportsDollarCost: false,
     reportsTokens: false,
-    supportsSessionResume: false,
+    supportsSessionResume: true,
+    supportsMemoryInjection: false,
   };
 
   buildArgs(opts: RunOptions): string[] {
@@ -32,6 +43,7 @@ export class CursorAdapter implements CliAdapter {
     // allowlist mode: rely on the user's ~/.cursor/cli-config.json permission
     // rules; commands outside them fail rather than hang on an approval prompt.
     args.push('--trust');
+    if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
     if (opts.extraArgs) args.push(...opts.extraArgs);
     return args;
   }

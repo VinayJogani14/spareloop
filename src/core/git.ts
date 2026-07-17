@@ -3,6 +3,44 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { dataDir } from './paths';
 
+/**
+ * Commit whatever the agent changed in a worktree onto its branch. Without
+ * this, changes sit as uncommitted working-tree files: `git diff`/`git log`
+ * against the branch would show nothing (the review workflow would be
+ * hollow), and deleting or cleaning up the worktree would silently lose the
+ * work. Commits on every outcome (not just success) so a failed/retried
+ * attempt's partial work is never lost either. No-ops cleanly if the agent
+ * made no changes.
+ */
+export function commitWorktreeChanges(worktreePath: string, message: string): boolean {
+  try {
+    const status = execFileSync('git', ['-C', worktreePath, 'status', '--porcelain'], {
+      encoding: 'utf8',
+    });
+    if (!status.trim()) return false; // nothing to commit
+    execFileSync('git', ['-C', worktreePath, 'add', '-A'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', worktreePath, 'commit', '-m', message, '--no-verify'], {
+      stdio: 'ignore',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Compact `git diff --stat` summary between a repo's HEAD and one of its branches. */
+export function diffStat(repoDir: string, branch: string): string | null {
+  try {
+    const out = execFileSync('git', ['-C', repoDir, 'diff', '--stat', `HEAD...${branch}`], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
 export function isGitRepo(dir: string): boolean {
   try {
     execFileSync('git', ['-C', dir, 'rev-parse', '--git-dir'], { stdio: 'ignore' });

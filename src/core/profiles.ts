@@ -12,6 +12,7 @@ export interface ProfileRow {
   extra_args_json: string | null;
   account: string | null;
   instructions: string | null;
+  memory_provider: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -24,11 +25,12 @@ export function addProfile(p: {
   permissionMode?: PermissionMode;
   account?: string | null;
   instructions?: string | null;
+  memoryProvider?: string | null;
 }): ProfileRow {
   getDb()
     .prepare(
-      `INSERT INTO profiles (id, name, tool, project_dir, model, permission_mode, account, instructions)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO profiles (id, name, tool, project_dir, model, permission_mode, account, instructions, memory_provider)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       randomUUID(),
@@ -38,7 +40,8 @@ export function addProfile(p: {
       p.model ?? null,
       p.permissionMode ?? 'allowlist',
       p.account ?? null,
-      p.instructions ?? null
+      p.instructions ?? null,
+      p.memoryProvider ?? null
     );
   return getProfile(p.name)!;
 }

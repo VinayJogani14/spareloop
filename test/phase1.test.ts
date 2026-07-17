@@ -13,7 +13,7 @@ import { addAccount, envForAccount, listAccounts } from '../src/core/accounts';
 import { routeAccount } from '../src/core/scheduler/accountRouter';
 import { dependencyGate } from '../src/daemon/loop';
 import { buildEffectivePrompt, resolveResumeSession } from '../src/daemon/taskRunner';
-import { prepareWorkspace } from '../src/core/git';
+import { prepareWorkspace, commitWorktreeChanges, diffStat } from '../src/core/git';
 import { addProfile, getProfile } from '../src/core/profiles';
 
 test('schema v2: accounts table and new task columns exist', () => {
@@ -153,6 +153,33 @@ test('prepareWorkspace: git repo gets an isolated worktree branch; non-repo runs
   // Non-git dir -> run in place.
   const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'spareloop-plain-'));
   assert.equal(prepareWorkspace('1234567890abcdef', plain, 'auto', noop).runDir, plain);
+});
+
+test('commitWorktreeChanges: agent edits land as a real commit, not just uncommitted files', () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'spareloop-commit-repo-'));
+  execFileSync('git', ['-C', repo, 'init'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', repo, 'config', 'user.email', 'test@test.dev'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', repo, 'config', 'user.name', 'Test'], { stdio: 'ignore' });
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'v1');
+  execFileSync('git', ['-C', repo, 'add', '.'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', repo, 'commit', '-m', 'init'], { stdio: 'ignore' });
+
+  const noop = () => {};
+  const ws = prepareWorkspace('1111222233334444', repo, 'auto', noop);
+  // Simulate what an agent does: create/edit files in the worktree.
+  fs.writeFileSync(path.join(ws.worktreePath!, 'notes.txt'), 'hello from the agent');
+
+  const committed = commitWorktreeChanges(ws.worktreePath!, 'spareloop: attempt 1 (success) - test task');
+  assert.equal(committed, true);
+
+  // The whole point: a diff against the branch now shows real, committed
+  // changes - not nothing, which is what a bare uncommitted worktree gives.
+  const stat = diffStat(repo, ws.gitBranch!);
+  assert.ok(stat);
+  assert.match(stat!, /notes\.txt/);
+
+  // No-op on a clean worktree (nothing to commit).
+  assert.equal(commitWorktreeChanges(ws.worktreePath!, 'should not commit anything'), false);
 });
 
 test('profiles: round-trip with account and instructions', () => {

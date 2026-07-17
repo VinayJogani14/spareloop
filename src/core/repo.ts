@@ -198,6 +198,41 @@ export function listRuns(taskId: string): any[] {
   return getDb().prepare('SELECT * FROM task_runs WHERE task_id = ? ORDER BY started_at').all(taskId);
 }
 
+export interface RunWithTask {
+  id: string;
+  task_id: string;
+  tool: ToolName;
+  account: string | null;
+  outcome: string | null;
+  started_at: string;
+  ended_at: string | null;
+  cost_usd: number | null;
+  cost_usd_estimated: number;
+  duration_ms: number | null;
+  git_branch: string | null;
+  worktree_path: string | null;
+  error_message: string | null;
+  rate_limit_message: string | null;
+  prompt: string;
+  project_dir: string;
+  is_prewarm: number;
+}
+
+/** Runs started within the last N hours, newest first — for the morning report. */
+export function runsSince(hours: number): RunWithTask[] {
+  return getDb()
+    .prepare(
+      `SELECT r.id, r.task_id, r.tool, r.account, r.outcome, r.started_at, r.ended_at,
+              r.cost_usd, r.cost_usd_estimated, r.duration_ms, r.git_branch, r.worktree_path,
+              r.error_message, r.rate_limit_message,
+              t.prompt, t.project_dir, t.is_prewarm
+       FROM task_runs r JOIN tasks t ON t.id = r.task_id
+       WHERE r.started_at >= datetime('now', ?)
+       ORDER BY r.started_at DESC`
+    )
+    .all(`-${hours} hours`) as RunWithTask[];
+}
+
 export function insertUsageEvents(events: NewUsageEvent[], taskRunId?: string): number {
   if (events.length === 0) return 0;
   const stmt = getDb().prepare(

@@ -176,8 +176,37 @@ DROP TABLE suggestions;
 ALTER TABLE suggestions_new RENAME TO suggestions;
 `;
 
+const MIGRATION_V4 = `
+ALTER TABLE learned_patterns ADD COLUMN account TEXT;
+ALTER TABLE suggestions ADD COLUMN account TEXT;
+
+-- prewarm_config becomes keyed by (tool, account): each registered account
+-- has its own rolling window and rhythm, so prewarm must be computed and
+-- fired per-account, not once per tool. account = '' is the sentinel for
+-- the default (non-spareloop-managed) login, since NULL can't be used as
+-- part of a meaningful uniqueness constraint (SQL NULL != NULL).
+CREATE TABLE prewarm_config_new (
+  tool            TEXT NOT NULL CHECK (tool IN ('claude','codex')),
+  account         TEXT NOT NULL DEFAULT '',
+  enabled         INTEGER NOT NULL DEFAULT 0,
+  scheduled_local_time TEXT,
+  manual_override INTEGER NOT NULL DEFAULT 0,
+  last_fired_at   TEXT,
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (tool, account)
+);
+INSERT INTO prewarm_config_new (tool, account, enabled, scheduled_local_time, manual_override, last_fired_at, updated_at)
+  SELECT tool, '', enabled, scheduled_local_time, manual_override, last_fired_at, updated_at FROM prewarm_config;
+DROP TABLE prewarm_config;
+ALTER TABLE prewarm_config_new RENAME TO prewarm_config;
+`;
+
+const MIGRATION_V5 = `
+ALTER TABLE profiles ADD COLUMN memory_provider TEXT;
+`;
+
 /** Ordered migrations; index i applies when user_version < i+1. */
-const MIGRATIONS: string[] = [SCHEMA, MIGRATION_V2, MIGRATION_V3];
+const MIGRATIONS: string[] = [SCHEMA, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5];
 
 let _db: Database.Database | null = null;
 

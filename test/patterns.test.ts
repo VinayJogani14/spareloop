@@ -27,6 +27,7 @@ test('prewarm formula matches the canonical example: exhaust 12:10 -> prewarm 07
   const pattern: WindowPattern = {
     id: 'p1',
     tool: 'claude',
+    account: null,
     windowStartLocal: '09:00',
     windowExhaustionLocal: '12:10',
     windowResetLocal: '14:00',
@@ -44,6 +45,7 @@ test('prewarm declines when dead zone is trivial', () => {
   const pattern: WindowPattern = {
     id: 'p2',
     tool: 'claude',
+    account: null,
     windowStartLocal: '09:00',
     windowExhaustionLocal: '13:50',
     windowResetLocal: '14:00',
@@ -59,6 +61,7 @@ test('prewarm declines with no exhaustion data', () => {
   const pattern: WindowPattern = {
     id: 'p3',
     tool: 'codex',
+    account: null,
     windowStartLocal: '09:00',
     windowExhaustionLocal: null,
     windowResetLocal: null,

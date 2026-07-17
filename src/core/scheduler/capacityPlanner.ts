@@ -60,6 +60,13 @@ export function assessCapacity(adapter: CliAdapter, now = new Date()): CapacityV
     }
   }
 
+  // Scoped to the default login specifically (latestPattern's account param
+  // defaults to null) - blending multiple accounts' independent rhythms into
+  // one pattern would never be meaningful. Per-account nuance matters most
+  // for prewarm (see prewarmComputer.ts), which IS fully per-account; this
+  // general pre-routing gate stays keyed to the default login as a
+  // deliberate scope boundary, since the target account for 'auto'-routed
+  // tasks isn't resolved until after this check.
   const pattern = latestPattern(adapter.tool);
   if (
     pattern &&

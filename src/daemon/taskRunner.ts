@@ -12,7 +12,7 @@ import {
 import { coolOffMsForUnparseableReset } from '../adapters/resetParser';
 import { envForAccount } from '../core/accounts';
 import { routeAccount } from '../core/scheduler/accountRouter';
-import { prepareWorkspace } from '../core/git';
+import { commitWorktreeChanges, prepareWorkspace } from '../core/git';
 import { getDb } from '../core/db';
 import { notify } from '../notify/index';
 
@@ -92,6 +92,16 @@ export async function executeTask(task: TaskRow, log: (msg: string) => void): Pr
   };
 
   const outcome = await adapter.run(opts);
+
+  if (ws.worktreePath) {
+    const committed = commitWorktreeChanges(
+      ws.worktreePath,
+      `spareloop: attempt ${attempt} (${outcome.kind}) - ${task.prompt.slice(0, 72)}`
+    );
+    if (committed) {
+      log(`task ${task.id.slice(0, 8)} changes committed to ${ws.gitBranch}`);
+    }
+  }
 
   const usageBase: Omit<NewUsageEvent, 'rateLimitHit' | 'rateLimitResetAt'> = {
     tool: task.tool,

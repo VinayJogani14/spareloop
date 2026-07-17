@@ -16,7 +16,7 @@ import {
   usageEventsSince,
 } from '../core/repo';
 import { detectDailyWindow, latestPattern } from '../core/patterns/windowDetector';
-import { computePrewarm, getPrewarmConfig, setPrewarmConfig } from '../core/patterns/prewarmComputer';
+import { computePrewarm, getPrewarmConfig, setPrewarmConfig, listPrewarmConfigs, acctFromKey } from '../core/patterns/prewarmComputer';
 import { generateSuggestions } from '../core/patterns/suggestionEngine';
 import { assessCapacity } from '../core/scheduler/capacityPlanner';
 import { readDaemonPid, runDaemon, runSingleTick } from '../daemon/index';
@@ -26,6 +26,15 @@ import { addProfile, getProfile, listProfiles, removeProfile } from '../core/pro
 import { predictWindow, predictWeekly } from '../core/patterns/predictor';
 import { computeHeatmap, computeWasteReport, renderHeatmapAscii } from '../core/patterns/heatmap';
 import { renderOneLine } from '../core/statusLine';
+import { runsSince } from '../core/repo';
+import { diffStat } from '../core/git';
+import { notify } from '../notify/index';
+import { listMemoryProviders, getMemoryProvider, missingEnvFor, buildMemoryExtraArgs } from '../core/memory';
+import { getWebhookUrl, setWebhookUrl, listWebhooks, WebhookChannel } from '../notify/webhookConfig';
+import { sendWebhook } from '../notify/webhook';
+import { toCsv, exportUsageEvents, exportTaskRuns } from '../core/exporter';
+import { runDoctor } from '../core/doctor';
+import { renderDashboard } from '../core/watch';
 import { detectBackend, install, uninstall, Backend } from '../daemon/installers/index';
 import { executeTask } from '../daemon/taskRunner';
 
@@ -33,7 +42,7 @@ const program = new Command();
 program
   .name('spareloop')
   .description('Queue AI-CLI tasks for spare usage capacity, learn your daily window pattern, and prewarm resets so they land when you need them.')
-  .version('0.3.1');
+  .version('0.4.0');
 
 program
   .command('init')
@@ -133,12 +142,30 @@ program
     const projectDir = path.resolve(opts.dir.replace(/^~/, process.env.HOME ?? '~'));
     if (!fs.existsSync(projectDir)) fail(`project dir does not exist: ${projectDir}`);
 
+    let extraArgs: string[] | undefined;
+    if (profile?.memory_provider) {
+      if (!getAdapter(opts.tool).capabilities.supportsMemoryInjection) {
+        fail(
+          `profile "${opts.profile}" has memory provider "${profile.memory_provider}" configured, ` +
+            `but ${opts.tool} doesn't support per-task MCP injection yet (only claude does currently)`
+        );
+      }
+      const missing = missingEnvFor(profile.memory_provider);
+      if (missing.length > 0) {
+        console.log(
+          `  warning: memory provider "${profile.memory_provider}" is missing env var(s): ${missing.join(', ')} — it will fail to authenticate.`
+        );
+      }
+      extraArgs = buildMemoryExtraArgs(profile.memory_provider);
+    }
+
     const id = insertTask({
       prompt: opts.prompt,
       tool: opts.tool,
       projectDir,
       model: opts.model ?? null,
       permissionMode: opts.permissionMode,
+      extraArgs,
       scheduleKind,
       scheduleAt,
       notBefore: opts.notBefore ? parseWhen(opts.notBefore).toISOString() : null,
@@ -303,6 +330,7 @@ profileCmd
   .option('--account <name>', 'account name or "auto"')
   .option('--instructions <text>', 'standing directions for every task using this profile')
   .option('--instructions-file <path>')
+  .option('--memory <provider>', 'attach a memory provider (see: spareloop memory list) - claude only, for now')
   .action((name, opts) => {
     if (!isToolName(opts.tool)) fail(`unknown tool: ${opts.tool}`);
     let instructions = opts.instructions ?? null;
@@ -313,6 +341,15 @@ profileCmd
     if (!fs.existsSync(dir)) fail(`project dir does not exist: ${dir}`);
     if (opts.account && opts.account !== 'auto' && !getAccount(opts.account))
       fail(`no account named ${opts.account}`);
+    if (opts.memory) {
+      if (!getMemoryProvider(opts.memory))
+        fail(`unknown memory provider "${opts.memory}" (see: spareloop memory list)`);
+      if (!getAdapter(opts.tool).capabilities.supportsMemoryInjection)
+        fail(`${opts.tool} doesn't support per-task MCP injection yet (only claude does currently)`);
+      const missing = missingEnvFor(opts.memory);
+      if (missing.length > 0)
+        console.log(`  warning: missing env var(s) for "${opts.memory}": ${missing.join(', ')} — set them before running tasks with this profile.`);
+    }
     addProfile({
       name,
       tool: opts.tool,
@@ -321,6 +358,7 @@ profileCmd
       permissionMode: opts.permissionMode,
       account: opts.account ?? null,
       instructions,
+      memoryProvider: opts.memory ?? null,
     });
     console.log(`Profile "${name}" saved. Use it: spareloop add --profile ${name} --prompt "..."`);
   });
@@ -334,7 +372,7 @@ profileCmd
       console.log(
         `${p.name.padEnd(16)} ${p.tool.padEnd(7)} ${p.project_dir}` +
           `${p.account ? `  account=${p.account}` : ''}${p.model ? `  model=${p.model}` : ''}` +
-          `${p.instructions ? '  [instructions]' : ''}`
+          `${p.instructions ? '  [instructions]' : ''}${p.memory_provider ? `  memory=${p.memory_provider}` : ''}`
       );
     }
   });
@@ -482,35 +520,95 @@ program
   .option('--verbose', 'include per-day observations')
   .action((opts) => {
     for (const adapter of rollingWindowAdapters()) {
-      const pattern = detectDailyWindow(adapter.tool);
       const label = adapter.tool === 'claude' ? 'Claude Code' : 'Codex CLI';
-      console.log(`\n${label} — usage pattern (21-day lookback, ${pattern.sampleDays} day(s) with limit hits, confidence ${confidenceWord(pattern.confidence)})`);
-      if (pattern.windowStartLocal == null) {
-        console.log('  No usage history yet. Use the tool normally (or run queued tasks) and check back.');
-        continue;
-      }
-      console.log(`  Typical start:      ${pattern.windowStartLocal}`);
-      console.log(`  Typical exhaustion: ${pattern.windowExhaustionLocal ?? 'never observed hitting the limit'}`);
-      console.log(`  Window reset:       ${pattern.windowResetLocal ?? '-'}`);
-      if (pattern.deadZoneMinutes != null)
-        console.log(`  Daily dead zone:    ~${pattern.deadZoneMinutes} min`);
+      const logins: Array<string | null> = [null, ...listAccounts(adapter.tool).map((a) => a.name)];
+      for (const account of logins) {
+        const pattern = detectDailyWindow(adapter.tool, new Date(), account);
+        const who = account ? `${label} (${account})` : label;
+        console.log(`\n${who} — usage pattern (21-day lookback, ${pattern.sampleDays} day(s) with limit hits, confidence ${confidenceWord(pattern.confidence)})`);
+        if (pattern.windowStartLocal == null) {
+          console.log('  No usage history yet. Use the tool normally (or run queued tasks) and check back.');
+          continue;
+        }
+        console.log(`  Typical start:      ${pattern.windowStartLocal}`);
+        console.log(`  Typical exhaustion: ${pattern.windowExhaustionLocal ?? 'never observed hitting the limit'}`);
+        console.log(`  Window reset:       ${pattern.windowResetLocal ?? '-'}`);
+        if (pattern.deadZoneMinutes != null)
+          console.log(`  Daily dead zone:    ~${pattern.deadZoneMinutes} min`);
 
-      const suggestions = generateSuggestions(pattern);
-      if (suggestions.length > 0) {
-        console.log('  Suggestions:');
-        suggestions.forEach((s, i) => console.log(`   ${i + 1}. [${s.kind}] ${s.message}`));
-      } else {
-        const decision = computePrewarm(pattern);
-        console.log(`  ${decision.reason}`);
-      }
-      if (opts.verbose) {
-        console.log('  Observations:');
-        for (const o of pattern.observations) {
-          console.log(`    ${o.day}: start=${o.windowStartMin}min exhaust=${o.exhaustionMin ?? '-'} reset=${o.resetMin ?? '-'} w=${o.weight.toFixed(2)}`);
+        const suggestions = generateSuggestions(pattern);
+        if (suggestions.length > 0) {
+          console.log('  Suggestions:');
+          suggestions.forEach((s, i) => console.log(`   ${i + 1}. [${s.kind}] ${s.message}`));
+        } else {
+          const decision = computePrewarm(pattern);
+          console.log(`  ${decision.reason}`);
+        }
+        if (opts.verbose) {
+          console.log('  Observations:');
+          for (const o of pattern.observations) {
+            console.log(`    ${o.day}: start=${o.windowStartMin}min exhaust=${o.exhaustionMin ?? '-'} reset=${o.resetMin ?? '-'} w=${o.weight.toFixed(2)}`);
+          }
         }
       }
     }
     console.log('\nCursor — monthly credit pool; no rolling-window pattern applies (run counts tracked, see: spareloop usage --tool cursor)');
+  });
+
+program
+  .command('report')
+  .description('Summary of what ran recently (default: last 12h) - the morning-after report')
+  .option('--hours <n>', 'lookback window in hours', '12')
+  .option('--notify', 'also send an OS notification with the summary')
+  .action((opts) => {
+    const hours = parseInt(opts.hours, 10);
+    const runs = runsSince(hours).filter((r) => !r.is_prewarm);
+    if (runs.length === 0) {
+      console.log(`No tasks ran in the last ${hours}h.`);
+      return;
+    }
+
+    const succeeded = runs.filter((r) => r.outcome === 'success');
+    const failed = runs.filter((r) => r.outcome === 'failure' || r.outcome === 'timeout');
+    const rateLimited = runs.filter((r) => r.outcome === 'rate_limited');
+    const totalCost = runs.reduce((s, r) => s + (r.cost_usd ?? 0), 0);
+    const anyEstimated = runs.some((r) => r.cost_usd != null && r.cost_usd_estimated === 1);
+
+    console.log(
+      `\nLast ${hours}h: ${succeeded.length} succeeded, ${failed.length} failed, ${rateLimited.length} rate-limited` +
+        (totalCost > 0 ? ` — ~$${totalCost.toFixed(4)}${anyEstimated ? ' (includes estimates)' : ''}` : '')
+    );
+
+    for (const r of runs) {
+      const when = r.started_at.replace('T', ' ').slice(0, 16);
+      const acct = r.account ? `@${r.account}` : '';
+      const head = `\n[${r.outcome ?? 'running'}] ${when} ${r.tool}${acct} — ${r.prompt.slice(0, 70)}`;
+      console.log(head);
+      if (r.cost_usd != null) console.log(`  cost: $${r.cost_usd.toFixed(4)}${r.cost_usd_estimated ? ' (est)' : ''}`);
+      if (r.outcome === 'success' && r.git_branch) {
+        const stat = diffStat(r.project_dir, r.git_branch);
+        if (stat) {
+          console.log(`  changes (${r.git_branch}):`);
+          stat.split('\n').forEach((line) => console.log(`    ${line}`));
+          console.log(`  review: cd ${r.project_dir} && git diff HEAD...${r.git_branch}`);
+        } else {
+          console.log(`  branch ${r.git_branch}: no diff against HEAD (or repo/branch no longer available)`);
+        }
+      }
+      if (r.outcome === 'rate_limited' && r.rate_limit_message) {
+        console.log(`  rate limit: ${r.rate_limit_message.slice(0, 150)}`);
+      }
+      if ((r.outcome === 'failure' || r.outcome === 'timeout') && r.error_message) {
+        console.log(`  error: ${r.error_message.slice(0, 200)}`);
+      }
+    }
+
+    if (opts.notify) {
+      notify(
+        'spareloop: morning report',
+        `${succeeded.length} succeeded, ${failed.length} failed, ${rateLimited.length} rate-limited in the last ${hours}h`
+      );
+    }
   });
 
 program
@@ -586,52 +684,189 @@ program
     console.log(renderOneLine(opts.tool));
   });
 
+const memoryCmd = program
+  .command('memory')
+  .description('Pluggable memory-provider integration (MCP) for cross-session recall — opt-in, per profile');
+
+memoryCmd
+  .command('list')
+  .description('Available memory providers and what they need')
+  .action(() => {
+    console.log('Only Claude Code supports per-task MCP injection currently (verified via --mcp-config).\n');
+    for (const p of listMemoryProviders()) {
+      const missing = missingEnvFor(p.name);
+      console.log(`${p.name.padEnd(14)} ${p.label}`);
+      console.log(`  needs: ${p.requiredEnv.join(', ')}${missing.length > 0 ? `  (missing: ${missing.join(', ')})` : '  (all set)'}`);
+      console.log(`  ${p.notes}`);
+      console.log(`  use it: spareloop profile add <name> --tool claude --dir <path> --memory ${p.name}\n`);
+    }
+  });
+
+memoryCmd
+  .command('status')
+  .description('Which profiles have a memory provider attached')
+  .action(() => {
+    const withMemory = listProfiles().filter((p) => p.memory_provider);
+    if (withMemory.length === 0) return console.log('No profiles have a memory provider attached.');
+    for (const p of withMemory) {
+      const missing = missingEnvFor(p.memory_provider!);
+      console.log(`${p.name.padEnd(16)} ${p.memory_provider}${missing.length > 0 ? `  MISSING ENV: ${missing.join(', ')}` : '  ok'}`);
+    }
+  });
+
+program
+  .command('watch')
+  .description('Live-updating dashboard: window burn rate, queue status, active tasks, recent activity')
+  .option('--interval <seconds>', 'refresh interval', '2')
+  .action((opts) => {
+    const intervalMs = Math.max(1000, parseFloat(opts.interval) * 1000);
+    const isTty = process.stdout.isTTY;
+    const draw = () => {
+      const frame = renderDashboard();
+      if (isTty) {
+        process.stdout.write('\x1b[2J\x1b[H'); // clear screen, cursor home
+      } else {
+        console.log('\n' + '='.repeat(70));
+      }
+      console.log(frame);
+    };
+    draw();
+    const timer = setInterval(draw, intervalMs);
+    process.on('SIGINT', () => {
+      clearInterval(timer);
+      if (isTty) process.stdout.write('\x1b[?25h'); // ensure cursor visible on exit
+      process.exit(0);
+    });
+  });
+
+program
+  .command('doctor')
+  .description('Diagnose daemon health, account/tool setup, and misconfigured tasks')
+  .action(async () => {
+    const { checks } = await runDoctor();
+    const icon = { ok: '✔', warn: '⚠', error: '✖' };
+    for (const c of checks) console.log(`${icon[c.status]} ${c.message}`);
+    const errors = checks.filter((c) => c.status === 'error').length;
+    const warns = checks.filter((c) => c.status === 'warn').length;
+    console.log(`\n${errors} error(s), ${warns} warning(s)`);
+    if (errors > 0) process.exitCode = 1;
+  });
+
+program
+  .command('export')
+  .description('Export usage/task history as CSV or JSON — survives whatever local log retention the underlying tool has')
+  .option('--what <what>', 'usage | tasks', 'usage')
+  .option('--format <format>', 'csv | json', 'csv')
+  .option('--tool <tool>')
+  .option('--days <n>', 'lookback days', '30')
+  .option('--out <path>', 'write to a file instead of stdout')
+  .action((opts) => {
+    if (opts.what !== 'usage' && opts.what !== 'tasks') fail('--what must be usage or tasks');
+    if (opts.format !== 'csv' && opts.format !== 'json') fail('--format must be csv or json');
+    const filter = { tool: opts.tool, days: parseInt(opts.days, 10) };
+    const rows = opts.what === 'usage' ? exportUsageEvents(filter) : exportTaskRuns(filter);
+    const output = opts.format === 'csv' ? toCsv(rows) : JSON.stringify(rows, null, 2);
+    if (opts.out) {
+      fs.writeFileSync(path.resolve(opts.out), output);
+      console.error(`Wrote ${rows.length} row(s) to ${opts.out}`);
+    } else {
+      process.stdout.write(output);
+    }
+  });
+
+const notifyCmd = program.command('notify').description('Configure notification channels');
+const webhookCmd = notifyCmd.command('webhook').description('Slack/Discord incoming-webhook forwarding');
+
+webhookCmd
+  .command('set <channel> <url>')
+  .description('Set the incoming-webhook URL for slack or discord')
+  .action((channel, url) => {
+    if (channel !== 'slack' && channel !== 'discord') fail('channel must be slack or discord');
+    setWebhookUrl(channel as WebhookChannel, url);
+    console.log(`${channel} webhook configured. Task completions, failures, and burn-rate alerts will now also post there.`);
+  });
+
+webhookCmd
+  .command('unset <channel>')
+  .action((channel) => {
+    if (channel !== 'slack' && channel !== 'discord') fail('channel must be slack or discord');
+    setWebhookUrl(channel as WebhookChannel, null);
+    console.log(`${channel} webhook removed.`);
+  });
+
+webhookCmd
+  .command('status')
+  .action(() => {
+    for (const { channel, url } of listWebhooks()) {
+      console.log(`${channel.padEnd(8)} ${url ? 'configured' : 'not configured'}`);
+    }
+  });
+
+webhookCmd
+  .command('test <channel>')
+  .action(async (channel) => {
+    if (channel !== 'slack' && channel !== 'discord') fail('channel must be slack or discord');
+    if (!getWebhookUrl(channel as WebhookChannel)) fail(`${channel} webhook not configured — set it first: spareloop notify webhook set ${channel} <url>`);
+    const ok = await sendWebhook(channel as WebhookChannel, 'spareloop: test notification', 'If you can see this, the webhook is working.');
+    console.log(ok ? `Sent — check ${channel}.` : `Failed to send — check the URL is a valid incoming webhook.`);
+  });
+
 const prewarm = program.command('prewarm').description('Manage window-prewarm scheduling');
 
 prewarm
   .command('enable')
-  .description('Enable daily prewarm for a rolling-window tool')
+  .description('Enable daily prewarm for a rolling-window tool (default login, or one registered account)')
   .requiredOption('--tool <tool>', 'claude | codex')
+  .option('--account <name>', 'registered account name (omit for the default login)')
   .option('--time <HH:MM>', 'manual fire time (skips auto-convergence)')
   .action((opts) => {
     if (opts.tool !== 'claude' && opts.tool !== 'codex')
       fail('prewarm only applies to rolling-window tools: claude, codex (Cursor has a monthly credit pool)');
+    const account: string | null = opts.account ?? null;
+    if (account && !getAccount(account)) fail(`no account named ${account}`);
     let time: string | null = opts.time ?? null;
     let manual = Boolean(opts.time);
     if (!time) {
-      const pattern = latestPattern(opts.tool) ?? detectDailyWindow(opts.tool);
+      const pattern = latestPattern(opts.tool, account) ?? detectDailyWindow(opts.tool, new Date(), account);
       const decision = computePrewarm(pattern);
       if (!decision.worthEnabling || !decision.proposedLocalTime) {
-        fail(`${decision.reason}\nYou can force a time manually: spareloop prewarm enable --tool ${opts.tool} --time 07:05`);
+        fail(`${decision.reason}\nYou can force a time manually: spareloop prewarm enable --tool ${opts.tool}${account ? ` --account ${account}` : ''} --time 07:05`);
       }
       time = decision.proposedLocalTime!;
     }
-    setPrewarmConfig(opts.tool, { enabled: true, scheduledLocalTime: time, manualOverride: manual });
-    console.log(`Prewarm enabled for ${opts.tool} at ${time}${manual ? ' (manual override — will not auto-adjust)' : ' (auto-converges as your pattern shifts)'}`);
+    setPrewarmConfig(opts.tool, account, { enabled: true, scheduledLocalTime: time, manualOverride: manual });
+    console.log(`Prewarm enabled for ${opts.tool}${account ? ` (${account})` : ''} at ${time}${manual ? ' (manual override — will not auto-adjust)' : ' (auto-converges as your pattern shifts)'}`);
     if (!readDaemonPid()) console.log('Daemon is not running — prewarm fires from the daemon: spareloop daemon install');
   });
 
 prewarm
   .command('disable')
   .requiredOption('--tool <tool>')
+  .option('--account <name>', 'registered account name (omit for the default login)')
   .action((opts) => {
     if (opts.tool !== 'claude' && opts.tool !== 'codex') fail('tool must be claude or codex');
-    setPrewarmConfig(opts.tool, { enabled: false });
-    console.log(`Prewarm disabled for ${opts.tool}.`);
+    const account: string | null = opts.account ?? null;
+    setPrewarmConfig(opts.tool, account, { enabled: false });
+    console.log(`Prewarm disabled for ${opts.tool}${account ? ` (${account})` : ''}.`);
   });
 
 prewarm
   .command('status')
   .action(() => {
     for (const tool of ['claude', 'codex'] as const) {
-      const cfg = getPrewarmConfig(tool);
-      if (!cfg || cfg.enabled !== 1) {
-        console.log(`${tool}: disabled`);
-        continue;
+      const configs = listPrewarmConfigs(tool);
+      const logins: Array<string | null> = [null, ...listAccounts(tool).map((a) => a.name)];
+      for (const account of logins) {
+        const label = account ? `${tool} (${account})` : tool;
+        const cfg = configs.find((c) => acctFromKey(c.account) === account);
+        if (!cfg || cfg.enabled !== 1) {
+          console.log(`${label}: disabled`);
+          continue;
+        }
+        console.log(
+          `${label}: enabled @ ${cfg.scheduled_local_time}${cfg.manual_override ? ' (manual)' : ' (auto)'}${cfg.last_fired_at ? `, last fired ${cfg.last_fired_at}` : ', never fired yet'}`
+        );
       }
-      console.log(
-        `${tool}: enabled @ ${cfg.scheduled_local_time}${cfg.manual_override ? ' (manual)' : ' (auto)'}${cfg.last_fired_at ? `, last fired ${cfg.last_fired_at}` : ', never fired yet'}`
-      );
     }
   });
 

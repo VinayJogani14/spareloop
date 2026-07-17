@@ -1,0 +1,20 @@
+name: Feature request
+description: Something spareloop should do but doesn't yet
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The scenario/pain point, not just the feature name.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach (optional)
+  - type: markdown
+    attributes:
+      value: |
+        Check [ROADMAP.md](../../ROADMAP.md) first — if it's already listed, comment there
+        instead of opening a duplicate.

@@ -14,6 +14,8 @@ export interface DailyObservation {
 export interface WindowPattern {
   id: string;
   tool: ToolName;
+  /** null = default (non-spareloop-managed) login; a name = that registered account. */
+  account: string | null;
   windowStartLocal: string | null;
   windowExhaustionLocal: string | null;
   windowResetLocal: string | null;
@@ -27,14 +29,24 @@ const LOOKBACK_DAYS = 21;
 const RECENCY_HALF_LIFE_DAYS = 7;
 
 /**
- * Reconstruct the user's typical daily rolling-window rhythm from usage events.
+ * Reconstruct the typical daily rolling-window rhythm from usage events, for
+ * ONE login (the default login, or one registered account) — each has its
+ * own independent 5-hour window and rhythm, so patterns must never be
+ * blended across accounts.
+ *
  * Ground truth is explicit rate-limit-hit events — the one unambiguous signal.
  * Aggregation uses a recency-weighted median so old habits fade over ~2-4 weeks
  * and single outlier days don't drag the estimate.
  */
-export function detectDailyWindow(tool: ToolName, now = new Date()): WindowPattern {
+export function detectDailyWindow(
+  tool: ToolName,
+  now = new Date(),
+  account: string | null = null
+): WindowPattern {
   const since = new Date(now.getTime() - LOOKBACK_DAYS * 24 * 3600 * 1000);
-  const events = usageEventsSince(tool, since.toISOString());
+  const events = usageEventsSince(tool, since.toISOString()).filter(
+    (e) => (e.account ?? null) === account
+  );
 
   const byDay = new Map<string, UsageEventRow[]>();
   for (const e of events) {
@@ -82,6 +94,7 @@ export function detectDailyWindow(tool: ToolName, now = new Date()): WindowPatte
   const pattern: WindowPattern = {
     id: randomUUID(),
     tool,
+    account,
     windowStartLocal: startMin != null ? toHHMM(startMin) : null,
     windowExhaustionLocal: exhaustionMin != null ? toHHMM(exhaustionMin) : null,
     windowResetLocal: resetMin != null ? toHHMM(resetMin) : null,
@@ -95,17 +108,18 @@ export function detectDailyWindow(tool: ToolName, now = new Date()): WindowPatte
   return pattern;
 }
 
-export function latestPattern(tool: ToolName): WindowPattern | null {
+export function latestPattern(tool: ToolName, account: string | null = null): WindowPattern | null {
   const row = getDb()
     .prepare(
       `SELECT * FROM learned_patterns WHERE tool = ? AND pattern_type = 'daily_window'
-       ORDER BY computed_at DESC LIMIT 1`
+       AND account IS ? ORDER BY computed_at DESC LIMIT 1`
     )
-    .get(tool) as any;
+    .get(tool, account) as any;
   if (!row) return null;
   return {
     id: row.id,
     tool: row.tool,
+    account: row.account,
     windowStartLocal: row.window_start_local,
     windowExhaustionLocal: row.window_exhaustion_local,
     windowResetLocal: row.window_reset_local,
@@ -119,14 +133,15 @@ export function latestPattern(tool: ToolName): WindowPattern | null {
 function persist(p: WindowPattern): void {
   getDb()
     .prepare(
-      `INSERT INTO learned_patterns (id, tool, pattern_type, window_start_local,
+      `INSERT INTO learned_patterns (id, tool, account, pattern_type, window_start_local,
          window_exhaustion_local, window_reset_local, dead_zone_minutes, confidence,
          sample_days, lookback_days, details_json)
-       VALUES (?, ?, 'daily_window', ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, 'daily_window', ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       p.id,
       p.tool,
+      p.account,
       p.windowStartLocal,
       p.windowExhaustionLocal,
       p.windowResetLocal,

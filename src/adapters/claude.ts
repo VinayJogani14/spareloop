@@ -27,6 +27,7 @@ export class ClaudeAdapter implements RollingWindowAdapter {
     reportsDollarCost: true,
     reportsTokens: true,
     supportsSessionResume: true,
+    supportsMemoryInjection: true,
   };
 
   buildArgs(opts: RunOptions): string[] {

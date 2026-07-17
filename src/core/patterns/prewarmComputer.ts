@@ -11,6 +11,14 @@ const HYSTERESIS_MINUTES = 5;
 const MIN_DEAD_ZONE_MINUTES = 20;
 const MIN_CONFIDENCE = 0.4;
 
+/** account: null -> default login; empty-string is the DB storage sentinel (see prewarm_config). */
+function acctKey(account: string | null): string {
+  return account ?? '';
+}
+function acctFromKey(key: string): string | null {
+  return key === '' ? null : key;
+}
+
 export interface PrewarmDecision {
   worthEnabling: boolean;
   proposedLocalTime: string | null; // "HH:MM"
@@ -23,27 +31,30 @@ export interface PrewarmDecision {
  * Fire a trivial prompt at (exhaustion - 5h - margin) = 07:05 instead, and the
  * window you actually burn through resets at ~12:05 — just before you'd have
  * hit the wall. The dead zone collapses.
+ *
+ * Computed per (tool, account) — each login has its own independent window.
  */
 export function computePrewarm(pattern: WindowPattern): PrewarmDecision {
+  const who = pattern.account ? `${pattern.tool}/${pattern.account}` : pattern.tool;
   if (pattern.windowExhaustionLocal == null) {
     return {
       worthEnabling: false,
       proposedLocalTime: null,
-      reason: `No rate-limit events observed yet for ${pattern.tool} (need ~5 days that hit the limit).`,
+      reason: `No rate-limit events observed yet for ${who} (need ~5 days that hit the limit).`,
     };
   }
   if (pattern.confidence < MIN_CONFIDENCE) {
     return {
       worthEnabling: false,
       proposedLocalTime: null,
-      reason: `Only ${pattern.sampleDays} day(s) of exhaustion data — pattern not stable enough yet.`,
+      reason: `Only ${pattern.sampleDays} day(s) of exhaustion data for ${who} — pattern not stable enough yet.`,
     };
   }
   if ((pattern.deadZoneMinutes ?? 0) < MIN_DEAD_ZONE_MINUTES) {
     return {
       worthEnabling: false,
       proposedLocalTime: null,
-      reason: `Observed dead zone is only ~${pattern.deadZoneMinutes ?? 0} min — prewarm wouldn't buy much.`,
+      reason: `Observed dead zone for ${who} is only ~${pattern.deadZoneMinutes ?? 0} min — prewarm wouldn't buy much.`,
     };
   }
 
@@ -53,31 +64,41 @@ export function computePrewarm(pattern: WindowPattern): PrewarmDecision {
     worthEnabling: true,
     proposedLocalTime: toHHMM(prewarmMin),
     reason:
-      `Typical exhaustion ${pattern.windowExhaustionLocal}, dead zone ~${pattern.deadZoneMinutes} min. ` +
-      `Prewarm at ${toHHMM(prewarmMin)} shifts your window reset to ~${toHHMM(prewarmMin + WINDOW_MINUTES)}, ` +
+      `[${who}] Typical exhaustion ${pattern.windowExhaustionLocal}, dead zone ~${pattern.deadZoneMinutes} min. ` +
+      `Prewarm at ${toHHMM(prewarmMin)} shifts the window reset to ~${toHHMM(prewarmMin + WINDOW_MINUTES)}, ` +
       `landing just before you'd normally hit the wall.`,
   };
 }
 
 export interface PrewarmConfigRow {
   tool: string;
+  account: string; // '' sentinel for default login (see prewarm_config schema note)
   enabled: number;
   scheduled_local_time: string | null;
   manual_override: number;
   last_fired_at: string | null;
 }
 
-export function getPrewarmConfig(tool: 'claude' | 'codex'): PrewarmConfigRow | undefined {
-  return getDb().prepare('SELECT * FROM prewarm_config WHERE tool = ?').get(tool) as
-    | PrewarmConfigRow
-    | undefined;
+export function getPrewarmConfig(
+  tool: 'claude' | 'codex',
+  account: string | null = null
+): PrewarmConfigRow | undefined {
+  return getDb()
+    .prepare('SELECT * FROM prewarm_config WHERE tool = ? AND account = ?')
+    .get(tool, acctKey(account)) as PrewarmConfigRow | undefined;
+}
+
+/** All prewarm configs for a tool, across the default login and every registered account. */
+export function listPrewarmConfigs(tool: 'claude' | 'codex'): PrewarmConfigRow[] {
+  return getDb().prepare('SELECT * FROM prewarm_config WHERE tool = ? ORDER BY account').all(tool) as PrewarmConfigRow[];
 }
 
 export function setPrewarmConfig(
   tool: 'claude' | 'codex',
+  account: string | null,
   fields: { enabled?: boolean; scheduledLocalTime?: string | null; manualOverride?: boolean; lastFiredAt?: string }
 ): void {
-  const existing = getPrewarmConfig(tool);
+  const existing = getPrewarmConfig(tool, account);
   const enabled = fields.enabled ?? (existing ? existing.enabled === 1 : false);
   const time =
     fields.scheduledLocalTime !== undefined
@@ -87,15 +108,15 @@ export function setPrewarmConfig(
   const lastFired = fields.lastFiredAt ?? existing?.last_fired_at ?? null;
   getDb()
     .prepare(
-      `INSERT INTO prewarm_config (tool, enabled, scheduled_local_time, manual_override, last_fired_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, datetime('now'))
-       ON CONFLICT(tool) DO UPDATE SET enabled = excluded.enabled,
+      `INSERT INTO prewarm_config (tool, account, enabled, scheduled_local_time, manual_override, last_fired_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(tool, account) DO UPDATE SET enabled = excluded.enabled,
          scheduled_local_time = excluded.scheduled_local_time,
          manual_override = excluded.manual_override,
          last_fired_at = excluded.last_fired_at,
          updated_at = datetime('now')`
     )
-    .run(tool, enabled ? 1 : 0, time, manual ? 1 : 0, lastFired);
+    .run(tool, acctKey(account), enabled ? 1 : 0, time, manual ? 1 : 0, lastFired);
 }
 
 /**
@@ -105,9 +126,10 @@ export function setPrewarmConfig(
  */
 export function reconcilePrewarmTime(
   tool: 'claude' | 'codex',
+  account: string | null,
   decision: PrewarmDecision
 ): { changed: boolean; from: string | null; to: string | null } {
-  const cfg = getPrewarmConfig(tool);
+  const cfg = getPrewarmConfig(tool, account);
   if (!cfg || cfg.enabled !== 1 || cfg.manual_override === 1) {
     return { changed: false, from: cfg?.scheduled_local_time ?? null, to: cfg?.scheduled_local_time ?? null };
   }
@@ -119,8 +141,10 @@ export function reconcilePrewarmTime(
     current == null ||
     Math.abs(fromHHMM(current) - fromHHMM(decision.proposedLocalTime)) > HYSTERESIS_MINUTES
   ) {
-    setPrewarmConfig(tool, { scheduledLocalTime: decision.proposedLocalTime });
+    setPrewarmConfig(tool, account, { scheduledLocalTime: decision.proposedLocalTime });
     return { changed: true, from: current, to: decision.proposedLocalTime };
   }
   return { changed: false, from: current, to: current };
 }
+
+export { acctKey, acctFromKey };

@@ -10,10 +10,17 @@ import { generateSuggestions } from '../core/patterns/suggestionEngine';
 import { currentWindowSnapshot, predictWindow } from '../core/patterns/predictor';
 import { notify } from '../notify/index';
 import { executeTask } from './taskRunner';
+import { listAccounts } from '../core/accounts';
+import { ToolName } from '../adapters/types';
 
 const PATTERN_RECOMPUTE_INTERVAL_MS = 60 * 60 * 1000; // hourly
 const ALERT_CHECK_INTERVAL_MS = 5 * 60 * 1000; // every 5 min
 const ALERT_THRESHOLDS = [50, 75, 90];
+
+/** Every login a tool has: the default login plus each registered account. */
+function loginsFor(tool: ToolName): (string | null)[] {
+  return [null, ...listAccounts(tool).map((a) => a.name)];
+}
 
 /** In-flight task promises, keyed by tool — max one concurrent task per tool. */
 const inFlight = new Map<string, Promise<unknown>>();
@@ -54,33 +61,38 @@ function checkBurnRateAlerts(now: Date): void {
   kvSet('last_alert_check', now.toISOString());
 
   for (const adapter of rollingWindowAdapters()) {
-    const prediction = predictWindow(adapter.tool, now);
-    if (!prediction.hasData || prediction.percentOfTypicalBudget == null) continue;
-    const snapshot = currentWindowSnapshot(adapter.tool, now);
-    if (!snapshot) continue;
+    for (const account of loginsFor(adapter.tool)) {
+      const prediction = predictWindow(adapter.tool, now, account);
+      if (!prediction.hasData || prediction.percentOfTypicalBudget == null) continue;
+      const snapshot = currentWindowSnapshot(adapter.tool, now, account);
+      if (!snapshot) continue;
 
-    // Fired-thresholds set is keyed by the actual detected window start, so a
-    // new window (new first-prompt or post-reset) naturally gets a fresh set.
-    const firedKey = `alert_fired:${adapter.tool}`;
-    const windowMarkerKey = `alert_window_start:${adapter.tool}`;
-    const windowStartIso = snapshot.windowStartAt.toISOString();
-    if (kvGet(windowMarkerKey) !== windowStartIso) {
-      kvSet(windowMarkerKey, windowStartIso);
-      kvSet(firedKey, '');
-    }
-    const alreadyFired = new Set((kvGet(firedKey) ?? '').split(',').filter(Boolean));
-
-    for (const threshold of ALERT_THRESHOLDS) {
-      const label = String(threshold);
-      if (prediction.percentOfTypicalBudget >= threshold && !alreadyFired.has(label)) {
-        alreadyFired.add(label);
-        const toolLabel = adapter.tool === 'claude' ? 'Claude Code' : 'Codex CLI';
-        const msg = `${Math.round(prediction.percentOfTypicalBudget)}% of typical window usage. ${prediction.reason}`;
-        notify(`${toolLabel}: ${threshold}% burn-rate alert`, msg);
-        log(`burn-rate alert [${adapter.tool}] crossed ${threshold}%: ${msg}`);
+      // Fired-thresholds set is keyed by the actual detected window start, so
+      // a new window (new first-prompt or post-reset) naturally gets a fresh
+      // set. Scoped per-account since each login's window is independent.
+      const acctSuffix = account ? `:${account}` : '';
+      const firedKey = `alert_fired:${adapter.tool}${acctSuffix}`;
+      const windowMarkerKey = `alert_window_start:${adapter.tool}${acctSuffix}`;
+      const windowStartIso = snapshot.windowStartAt.toISOString();
+      if (kvGet(windowMarkerKey) !== windowStartIso) {
+        kvSet(windowMarkerKey, windowStartIso);
+        kvSet(firedKey, '');
       }
+      const alreadyFired = new Set((kvGet(firedKey) ?? '').split(',').filter(Boolean));
+
+      for (const threshold of ALERT_THRESHOLDS) {
+        const label = String(threshold);
+        if (prediction.percentOfTypicalBudget >= threshold && !alreadyFired.has(label)) {
+          alreadyFired.add(label);
+          const toolLabel = adapter.tool === 'claude' ? 'Claude Code' : 'Codex CLI';
+          const who = account ? ` (${account})` : '';
+          const msg = `${Math.round(prediction.percentOfTypicalBudget)}% of typical window usage. ${prediction.reason}`;
+          notify(`${toolLabel}${who}: ${threshold}% burn-rate alert`, msg);
+          log(`burn-rate alert [${adapter.tool}${acctSuffix}] crossed ${threshold}%: ${msg}`);
+        }
+      }
+      kvSet(firedKey, [...alreadyFired].join(','));
     }
-    kvSet(firedKey, [...alreadyFired].join(','));
   }
 }
 
@@ -180,17 +192,20 @@ function maybeRecomputePatterns(now: Date): void {
   kvSet('last_pattern_compute', now.toISOString());
 
   for (const adapter of rollingWindowAdapters()) {
-    try {
-      const pattern = detectDailyWindow(adapter.tool, now);
-      const decision = computePrewarm(pattern);
-      const moved = reconcilePrewarmTime(adapter.tool as 'claude' | 'codex', decision);
-      if (moved.changed) {
-        log(`prewarm time for ${adapter.tool} converged: ${moved.from ?? 'unset'} -> ${moved.to}`);
+    for (const account of loginsFor(adapter.tool)) {
+      const who = account ? `${adapter.tool}/${account}` : adapter.tool;
+      try {
+        const pattern = detectDailyWindow(adapter.tool, now, account);
+        const decision = computePrewarm(pattern);
+        const moved = reconcilePrewarmTime(adapter.tool as 'claude' | 'codex', account, decision);
+        if (moved.changed) {
+          log(`prewarm time for ${who} converged: ${moved.from ?? 'unset'} -> ${moved.to}`);
+        }
+        const suggestions = generateSuggestions(pattern);
+        for (const s of suggestions) log(`new suggestion [${who}/${s.kind}]`);
+      } catch (err) {
+        log(`pattern compute error for ${who}: ${(err as Error).message}`);
       }
-      const suggestions = generateSuggestions(pattern);
-      for (const s of suggestions) log(`new suggestion [${s.tool}/${s.kind}]`);
-    } catch (err) {
-      log(`pattern compute error for ${adapter.tool}: ${(err as Error).message}`);
     }
   }
 }
@@ -202,32 +217,35 @@ function maybeRecomputePatterns(now: Date): void {
 function schedulePrewarmTasks(now: Date): void {
   for (const adapter of rollingWindowAdapters()) {
     const tool = adapter.tool as 'claude' | 'codex';
-    const cfg = getPrewarmConfig(tool);
-    if (!cfg || cfg.enabled !== 1 || !cfg.scheduled_local_time) continue;
+    for (const account of loginsFor(tool)) {
+      const cfg = getPrewarmConfig(tool, account);
+      if (!cfg || cfg.enabled !== 1 || !cfg.scheduled_local_time) continue;
 
-    const todayKey = now.toISOString().slice(0, 10);
-    const markerKey = `prewarm_scheduled:${tool}:${todayKey}`;
-    if (kvGet(markerKey)) continue;
+      const todayKey = now.toISOString().slice(0, 10);
+      const markerKey = `prewarm_scheduled:${tool}:${account ?? ''}:${todayKey}`;
+      if (kvGet(markerKey)) continue;
 
-    const [h, m] = cfg.scheduled_local_time.split(':').map(Number);
-    const fireAt = new Date(now);
-    fireAt.setHours(h, m, 0, 0);
-    if (fireAt <= now) continue; // today's slot already passed; schedule resumes tomorrow
+      const [h, m] = cfg.scheduled_local_time.split(':').map(Number);
+      const fireAt = new Date(now);
+      fireAt.setHours(h, m, 0, 0);
+      if (fireAt <= now) continue; // today's slot already passed; schedule resumes tomorrow
 
-    insertTask({
-      prompt: 'Reply with exactly: OK',
-      tool,
-      projectDir: process.env.HOME ?? '/tmp',
-      permissionMode: 'allowlist',
-      isPrewarm: true,
-      scheduleKind: 'explicit',
-      scheduleAt: fireAt.toISOString(),
-      maxAttempts: 1,
-      priority: 100, // prewarm exists to start the window — never let backlog delay it
-    });
-    kvSet(markerKey, '1');
-    setPrewarmConfig(tool, {});
-    log(`prewarm task scheduled for ${tool} at ${cfg.scheduled_local_time} (${fireAt.toISOString()})`);
+      insertTask({
+        prompt: 'Reply with exactly: OK',
+        tool,
+        projectDir: process.env.HOME ?? '/tmp',
+        permissionMode: 'allowlist',
+        account, // fires under the SAME login whose pattern triggered it
+        isPrewarm: true,
+        scheduleKind: 'explicit',
+        scheduleAt: fireAt.toISOString(),
+        maxAttempts: 1,
+        priority: 100, // prewarm exists to start the window — never let backlog delay it
+      });
+      kvSet(markerKey, '1');
+      setPrewarmConfig(tool, account, {});
+      log(`prewarm task scheduled for ${tool}${account ? '/' + account : ''} at ${cfg.scheduled_local_time} (${fireAt.toISOString()})`);
+    }
   }
 }
 

@@ -9,6 +9,17 @@ export interface ToolCapabilities {
   reportsTokens: boolean;
   /** Tool can resume a previous session by id in headless mode. */
   supportsSessionResume: boolean;
+  /**
+   * Tool accepts an ad-hoc MCP server config scoped to a single invocation
+   * (vs. requiring persistent registration in the user's global config).
+   * Verified for Claude Code (`--mcp-config`, both stdio and HTTP transport).
+   * Codex's MCP support is registration-based (`codex mcp add`) with an
+   * unverified story for per-invocation HTTP servers via `-c` overrides.
+   * Cursor has no per-invocation mechanism at all - only persistent
+   * `~/.cursor/mcp.json` + `--approve-mcps` to auto-approve what's already
+   * registered there.
+   */
+  supportsMemoryInjection: boolean;
 }
 
 export type PermissionMode = 'allowlist' | 'full_bypass';

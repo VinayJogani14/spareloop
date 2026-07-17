@@ -15,6 +15,7 @@ export interface Suggestion {
     | 'route_to_peak_gap'
     | 'weekly_pace_warning';
   tool: string;
+  account: string | null;
   message: string;
   proposedPrewarmLocal: string | null;
 }
@@ -23,20 +24,24 @@ export interface Suggestion {
  * Turn a learned pattern into concrete, actionable suggestions.
  * New suggestions are persisted (deduped against recent identical ones) so
  * `spareloop suggest` shows history and the daemon can notify only on change.
+ * A pattern is always for ONE login (default or a specific account) -
+ * suggestions inherit that scope.
  */
 export function generateSuggestions(pattern: WindowPattern): Suggestion[] {
   const out: Suggestion[] = [];
   const decision = computePrewarm(pattern);
   const tool = pattern.tool as 'claude' | 'codex';
-  const cfg = getPrewarmConfig(tool);
+  const account = pattern.account;
+  const cfg = getPrewarmConfig(tool, account);
+  const enableCmd = `spareloop prewarm enable --tool ${tool}${account ? ` --account ${account}` : ''}`;
 
   if (decision.worthEnabling && decision.proposedLocalTime) {
     if (!cfg || cfg.enabled !== 1) {
       out.push({
         kind: 'enable_prewarm',
         tool,
-        message:
-          `${decision.reason}\n     -> spareloop prewarm enable --tool ${tool}`,
+        account,
+        message: `${decision.reason}\n     -> ${enableCmd}`,
         proposedPrewarmLocal: decision.proposedLocalTime,
       });
     } else if (
@@ -47,6 +52,7 @@ export function generateSuggestions(pattern: WindowPattern): Suggestion[] {
       out.push({
         kind: 'adjust_prewarm_time',
         tool,
+        account,
         message: `Your pattern drifted: prewarm moving ${cfg.scheduled_local_time} -> ${decision.proposedLocalTime}. ${decision.reason}`,
         proposedPrewarmLocal: decision.proposedLocalTime,
       });
@@ -55,11 +61,14 @@ export function generateSuggestions(pattern: WindowPattern): Suggestion[] {
 
   if (pattern.deadZoneMinutes != null && pattern.deadZoneMinutes >= 20 && pattern.confidence >= 0.4) {
     const spareTasks = listTasks({ status: 'queued', tool: pattern.tool }).filter(
-      (t) => t.schedule_kind === 'spare_capacity' || t.schedule_kind === 'asap'
+      (t) =>
+        (t.schedule_kind === 'spare_capacity' || t.schedule_kind === 'asap') &&
+        (t.account ?? null) === account
     );
     out.push({
       kind: 'queue_into_dead_zone',
       tool: pattern.tool,
+      account,
       message:
         `Your ${pattern.windowExhaustionLocal}-${pattern.windowResetLocal} dead zone (~${pattern.deadZoneMinutes} min/day) ` +
         `is prime time for queued background work` +
@@ -70,29 +79,36 @@ export function generateSuggestions(pattern: WindowPattern): Suggestion[] {
     });
   }
 
-  const heatmap = computeHeatmap(pattern.tool, 21);
-  if (heatmap.peakHour && heatmap.quietHours.length > 0) {
-    const peakLabel = `${String(heatmap.peakHour.hour).padStart(2, '0')}:00`;
-    const quietLabel = heatmap.quietHours
-      .slice(0, 3)
-      .map((h) => `${String(h).padStart(2, '0')}:00`)
-      .join(', ');
-    out.push({
-      kind: 'route_to_peak_gap',
-      tool: pattern.tool,
-      message: `Your peak usage hour is ${peakLabel}; quietest hours are ${quietLabel} (near-zero usage). Schedule heavy queued work at the quiet hours to keep peak-hour capacity free for interactive use.`,
-      proposedPrewarmLocal: null,
-    });
-  }
+  // Heatmap/weekly-pace are tool-wide aggregate concepts (not meaningfully
+  // per-account), so only emit them once - tied to the default-login pass -
+  // rather than duplicating the same aggregate advice once per account.
+  if (account === null) {
+    const heatmap = computeHeatmap(pattern.tool, 21);
+    if (heatmap.peakHour && heatmap.quietHours.length > 0) {
+      const peakLabel = `${String(heatmap.peakHour.hour).padStart(2, '0')}:00`;
+      const quietLabel = heatmap.quietHours
+        .slice(0, 3)
+        .map((h) => `${String(h).padStart(2, '0')}:00`)
+        .join(', ');
+      out.push({
+        kind: 'route_to_peak_gap',
+        tool: pattern.tool,
+        account: null,
+        message: `Your peak usage hour is ${peakLabel}; quietest hours are ${quietLabel} (near-zero usage). Schedule heavy queued work at the quiet hours to keep peak-hour capacity free for interactive use.`,
+        proposedPrewarmLocal: null,
+      });
+    }
 
-  const weekly = predictWeekly(pattern.tool);
-  if (weekly.hasData && weekly.projectedWeekCostUsd != null && weekly.fractionOfWeekElapsed < 0.9) {
-    out.push({
-      kind: 'weekly_pace_warning',
-      tool: pattern.tool,
-      message: `At this week's pace you're projected to reach ~$${weekly.projectedWeekCostUsd.toFixed(2)} by week's end (~$${(weekly.costUsdSoFar ?? 0).toFixed(2)} so far, ${Math.round(weekly.fractionOfWeekElapsed * 100)}% of the week elapsed). This is a naive same-pace projection, not a calibrated weekly-cap ETA.`,
-      proposedPrewarmLocal: null,
-    });
+    const weekly = predictWeekly(pattern.tool);
+    if (weekly.hasData && weekly.projectedWeekCostUsd != null && weekly.fractionOfWeekElapsed < 0.9) {
+      out.push({
+        kind: 'weekly_pace_warning',
+        tool: pattern.tool,
+        account: null,
+        message: `At this week's pace you're projected to reach ~$${weekly.projectedWeekCostUsd.toFixed(2)} by week's end (~$${(weekly.costUsdSoFar ?? 0).toFixed(2)} so far, ${Math.round(weekly.fractionOfWeekElapsed * 100)}% of the week elapsed). This is a naive same-pace projection, not a calibrated weekly-cap ETA.`,
+        proposedPrewarmLocal: null,
+      });
+    }
   }
 
   persistNew(pattern.id, out);
@@ -103,18 +119,18 @@ function persistNew(patternId: string, suggestions: Suggestion[]): void {
   const db = getDb();
   for (const s of suggestions) {
     // Dedupe: skip if an identical-kind suggestion with the same proposed time
-    // for this tool already exists in the last 24h.
+    // for this tool+account already exists in the last 24h.
     const dupe = db
       .prepare(
-        `SELECT id FROM suggestions WHERE tool = ? AND kind = ?
+        `SELECT id FROM suggestions WHERE tool = ? AND kind = ? AND account IS ?
            AND COALESCE(proposed_prewarm_local,'') = COALESCE(?, '')
            AND created_at > datetime('now', '-1 day') LIMIT 1`
       )
-      .get(s.tool, s.kind, s.proposedPrewarmLocal);
+      .get(s.tool, s.kind, s.account, s.proposedPrewarmLocal);
     if (dupe) continue;
     db.prepare(
-      `INSERT INTO suggestions (id, pattern_id, kind, tool, message, proposed_prewarm_local)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(randomUUID(), patternId, s.kind, s.tool, s.message, s.proposedPrewarmLocal);
+      `INSERT INTO suggestions (id, pattern_id, kind, tool, account, message, proposed_prewarm_local)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(randomUUID(), patternId, s.kind, s.tool, s.account, s.message, s.proposedPrewarmLocal);
   }
 }

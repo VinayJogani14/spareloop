@@ -19,6 +19,14 @@ const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
  * Adapter for OpenAI Codex CLI headless mode (`codex exec`).
  * Reports tokens via NDJSON `turn.completed` events but no dollar cost —
  * cost is estimated from the pricing table and flagged as estimated.
+ *
+ * Flag surface verified against a real `codex-cli 0.144.5` install
+ * (2026-07-17): `-a/--ask-for-approval` exists on the top-level `codex`
+ * command but is REJECTED by `codex exec` ("unexpected argument '-a'
+ * found") — exec mode already runs with `approval: never` by default
+ * (confirmed in its own printed run header), since there's no TTY to prompt
+ * in headless mode. `-s/--sandbox` is accepted by plain `exec` but NOT by
+ * `exec resume` (sandbox is inherited from the resumed session).
  */
 export class CodexAdapter implements RollingWindowAdapter {
   readonly tool = 'codex' as const;
@@ -27,18 +35,32 @@ export class CodexAdapter implements RollingWindowAdapter {
     hasRollingWindow: true,
     reportsDollarCost: false,
     reportsTokens: true,
-    // `codex exec resume` exists but headless-resume semantics are unverified;
-    // enable once validated against a real install.
-    supportsSessionResume: false,
+    supportsSessionResume: true,
+    supportsMemoryInjection: false,
   };
 
   buildArgs(opts: RunOptions): string[] {
-    const args = ['exec', opts.prompt, '--json'];
+    const args = ['exec'];
+    if (opts.resumeSessionId) {
+      args.push('resume', opts.resumeSessionId, opts.prompt);
+    } else {
+      args.push(opts.prompt);
+    }
+    args.push('--json');
+    // spareloop tasks run in whatever directory the user configured (queue
+    // add --dir, a profile, or a plain scratch dir) - not necessarily a git
+    // repo. Codex otherwise refuses with "Not inside a trusted directory"
+    // (verified against a real install: fails in /tmp, works with this flag).
+    // The directory is inherently user-trusted since they explicitly
+    // configured spareloop to run there.
+    args.push('--skip-git-repo-check');
     if (opts.model) args.push('--model', opts.model);
     if (opts.permissionMode === 'full_bypass') {
       args.push('--dangerously-bypass-approvals-and-sandbox');
-    } else {
-      args.push('-a', 'never', '-s', 'workspace-write');
+    } else if (!opts.resumeSessionId) {
+      // -s/--sandbox isn't accepted by `exec resume` - inherited from the
+      // original session instead.
+      args.push('-s', 'workspace-write');
     }
     if (opts.extraArgs) args.push(...opts.extraArgs);
     return args;
@@ -57,17 +79,29 @@ export class CodexAdapter implements RollingWindowAdapter {
 
     if (res.timedOut) return { kind: 'timeout', stdoutLogPath: res.stdoutLogPath };
 
+    // Verified against a real install: the clean, structured error lives in
+    // stdout's NDJSON `turn.failed` event (`error.message`); stderr carries
+    // noisy tracing/retry logs (e.g. repeated "Reconnecting... N/5"
+    // websocket lines) that make a poor primary error message.
+    let turnFailedMessage: string | null = null;
+    for (const line of res.stdout.split('\n')) {
+      const evt = safeParse(line);
+      if (evt?.type === 'turn.failed' && typeof evt?.error?.message === 'string') {
+        turnFailedMessage = evt.error.message;
+      }
+    }
+
     const combined = res.stdout + '\n' + res.stderr;
-    if (res.exitCode !== 0 && looksRateLimited(combined)) {
+    if (res.exitCode !== 0 && (looksRateLimited(combined) || (turnFailedMessage && looksRateLimited(turnFailedMessage)))) {
+      const rawMessage =
+        (turnFailedMessage && looksRateLimited(turnFailedMessage) ? turnFailedMessage : null) ??
+        combined.split('\n').find((l) => looksRateLimited(l))?.trim().slice(0, 500) ??
+        '';
       return {
         kind: 'rate_limited',
         metrics: { durationMs: res.durationMs },
-        resetAt: this.parseRateLimitReset(combined, new Date()),
-        rawMessage: combined
-          .split('\n')
-          .find((l) => looksRateLimited(l))
-          ?.trim()
-          .slice(0, 500) ?? '',
+        resetAt: this.parseRateLimitReset(rawMessage, new Date()),
+        rawMessage,
         stdoutLogPath: res.stdoutLogPath,
       };
     }
@@ -75,7 +109,7 @@ export class CodexAdapter implements RollingWindowAdapter {
       return {
         kind: 'failure',
         exitCode: res.exitCode,
-        errorMessage: res.stderr.slice(0, 2000) || 'non-zero exit',
+        errorMessage: (turnFailedMessage ?? res.stderr).slice(0, 2000) || 'non-zero exit',
         stdoutLogPath: res.stdoutLogPath,
         stderrLogPath: res.stderrLogPath,
       };

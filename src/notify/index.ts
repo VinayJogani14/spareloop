@@ -1,11 +1,14 @@
 import { spawn } from 'child_process';
+import { sendWebhooksFireAndForget } from './webhook';
 
 /**
- * Best-effort OS notification. Never throws, never blocks the caller — a
- * missing notifier just means the message doesn't reach the desktop. Callers
- * are responsible for also logging the message so it's never silently lost.
- * (Deliberately does not depend on the daemon's logger, to avoid a
- * notify <-> daemon/loop circular import.)
+ * Best-effort notification, fanned out to every configured channel: an OS
+ * desktop notification, plus Slack/Discord if webhook URLs are configured
+ * (spareloop notify webhook set). Never throws, never blocks the caller — a
+ * missing notifier or a webhook outage just means the message doesn't reach
+ * that channel. Callers are responsible for also logging the message so it's
+ * never silently lost everywhere. (Deliberately does not depend on the
+ * daemon's logger, to avoid a notify <-> daemon/loop circular import.)
  */
 export function notify(title: string, message: string): void {
   try {
@@ -19,6 +22,7 @@ export function notify(title: string, message: string): void {
   } catch {
     // Never let a notification failure affect the caller.
   }
+  sendWebhooksFireAndForget(title, message);
 }
 
 function quoteAppleScript(s: string): string {

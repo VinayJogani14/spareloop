@@ -12,7 +12,7 @@
 [![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen?logo=node.js&logoColor=white)](package.json)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-blueviolet.svg)](CONTRIBUTING.md)
 
-[Quick Start](#-quick-start) · [The Prewarm Trick](#-the-prewarm-trick) · [Queue](#-queue-tasks-into-spare-capacity) · [Multi-Account](#-multiple-accounts) · [Chains & Sessions](#-task-chains--session-continuity) · [Safety](#-safety-model) · [vs. Alternatives](#-vs-alternatives) · [Roadmap](#-roadmap)
+[Quick Start](#-quick-start) · [Prewarm](#-the-prewarm-trick) · [Queue](#-queue-tasks-into-spare-capacity) · [Multi-Account](#-multiple-accounts) · [Chains & Sessions](#-task-chains--session-continuity) · [Memory](#-memory-providers) · [Safety](#-safety-model) · [vs. Alternatives](#-vs-alternatives) · [Roadmap](ROADMAP.md)
 
 ![spareloop demo: suggest, predict, and stats commands running against real usage history](demo/demo.gif)
 
@@ -34,11 +34,13 @@ You pay for Claude Code / Codex / Cursor, but usage limits don't roll over. Some
 
 spareloop closes that loop:
 
-- 🌙 **Queue real work into wasted capacity** — refactors, tests, doc updates run unattended overnight or in your dead zones, each in its own repo, on its own branch, with retries that respect rate-limit resets
-- 🧠 **Learn how you actually work** — reconstructs your daily window start / exhaustion / reset rhythm from your own session logs (recency-weighted, 21-day lookback)
+- 🌙 **Queue real work into wasted capacity** — refactors, tests, doc updates run unattended overnight or in your dead zones, each in its own repo, on its own committed branch, with retries that respect rate-limit resets
+- 🧠 **Learn how you actually work** — reconstructs your daily window start / exhaustion / reset rhythm from your own session logs, **per account** (recency-weighted, 21-day lookback)
 - ⏰ **Prewarm your window** — fires one trivial prompt early so your 5-hour window resets *right before* you'd normally hit the wall
 - 🔀 **Route across your accounts** — work + personal subscriptions, auto-routed to whichever has capacity
 - 🔗 **Chain tasks with session continuity** — "migrate, then fix tests" pipelines that resume the same conversation
+- 📋 **Wake up to a report** — what ran overnight, what it cost, and a real `git diff` per task
+- 🧩 **Bring your own memory** — attach Mem0/Supermemory via MCP so queued tasks recall context across runs
 
 > **What spareloop is not:** it does not bypass, extend, or manipulate any vendor's limits. All accounting stays server-side, untouched. spareloop just makes sure the capacity you already pay for stops evaporating unused.
 
@@ -135,15 +137,55 @@ spareloop add --after $A --same-session --prompt "Now run the test suite and fix
 
 `--after` gates on success (a failed migration cancels the follow-up instead of "fixing tests" against a broken schema). `--same-session` resumes the dependency's actual conversation — full context, no amnesia. `--continue-from <task-id>` resumes any past task's session.
 
+## 🧩 Memory Providers
+
+Session resume (above) gives a task chain the same conversation. For recall *across* unrelated tasks and days, attach a third-party memory layer via MCP — opt-in, per profile, never on by default:
+
+```bash
+export MEM0_API_KEY=...   # or SUPERMEMORY_API_KEY
+spareloop memory list                                          # see providers + what they need
+spareloop profile add backend --tool claude --dir ~/code/api --memory mem0
+spareloop add --profile backend --prompt "..."                 # this task's Claude Code gets the MCP server injected
+```
+
+Claude Code only, for now — its `--mcp-config` flag was verified live (both stdio and HTTP-transport MCP servers connect successfully with no prior registration needed). Codex's MCP support is registration-based, and Cursor has no per-invocation MCP flag at all, so neither can take an ad-hoc memory server per task yet.
+
+## 📋 Morning Report
+
+```bash
+spareloop report                # last 12h by default
+spareloop report --hours 24 --notify
+```
+
+Shows what ran, success/failure/rate-limited counts, total cost, and — for tasks in git repos — a real `git diff --stat` against each task's branch, since changes are auto-committed after every attempt.
+
+## 🔔 Notifications
+
+Burn-rate threshold alerts (50/75/90%) and task completion/failure notifications fire as OS notifications automatically once the daemon is running. Forward them to Slack/Discord too:
+
+```bash
+spareloop notify webhook set slack https://hooks.slack.com/services/...
+spareloop notify webhook test slack
+```
+
+## 📤 Export & Diagnostics
+
+```bash
+spareloop export --what usage --format csv --days 30 --out usage.csv    # or --format json
+spareloop doctor      # daemon health, account config-dir sanity, misconfigured tasks, memory-provider env
+spareloop watch       # live dashboard: window burn rate, queue, active tasks, recent activity
+```
+
 ## 🛡️ Safety Model
 
 Letting an agent work while you sleep requires trust. spareloop's defaults are built for it:
 
-- **Auto-branch isolation:** tasks in git repos run in a dedicated **git worktree** on branch `spareloop/<id>` — your working tree is never touched. Review over coffee: `git diff main...spareloop/a1b2c3d4`. Opt out per task with `--no-branch`.
-- **Safe permission modes by default:** Claude `--permission-mode dontAsk` (auto-denies outside your allow rules), Codex `-a never -s workspace-write` (sandboxed), Cursor allowlist. Nothing prompts, nothing hangs, nothing silently approved.
+- **Auto-branch isolation:** tasks in git repos run in a dedicated **git worktree** on branch `spareloop/<id>` — your working tree is never touched. Changes are **auto-committed onto the branch after every attempt** (success or failure), so `git diff`/`git log` against it always show real history and nothing is silently lost if the worktree gets cleaned up. Review over coffee: `git diff main...spareloop/a1b2c3d4`. Opt out per task with `--no-branch`.
+- **Safe permission modes by default:** Claude `--permission-mode dontAsk` (auto-denies outside your allow rules), Codex `-s workspace-write` (sandboxed — Codex's exec mode already runs with `approval: never` by default, since there's no TTY to prompt), Cursor allowlist. Nothing prompts, nothing hangs, nothing silently approved.
 - **Full bypass is opt-in, per task** (`--permission-mode full_bypass`) — for repos where you'd accept any outcome.
 - **One task per repo, one per tool, at a time.** No agent pile-ups.
 - **Honest metrics only:** Claude reports real `$`; Codex tokens → estimated `$` (flagged); Cursor exposes nothing, so nothing is invented.
+- **`spareloop doctor`** catches the failure modes above before they bite — misconfigured accounts, missing memory-provider credentials, daemon health — in one command.
 
 ## 🧰 Tool Support
 
@@ -153,11 +195,12 @@ Letting an agent work while you sleep requires trust. spareloop's defaults are b
 | Queue + scheduling    | ✅          | ✅        | ✅         |
 | Cost tracking         | native `$`  | tokens → est. `$` | run counts only |
 | Usage-pattern learning | ✅ session logs | ✅ session logs | n/a |
-| Prewarm (rolling window) | ✅       | ✅        | n/a — monthly credit pool |
+| Prewarm (rolling window, per-account) | ✅ | ✅ | n/a — monthly credit pool |
 | Multi-account         | ✅          | ✅        | —          |
-| Session resume in chains | ✅       | soon      | —          |
+| Session resume in chains | ✅       | ✅        | ✅ (flag verified; not live-round-tripped) |
+| Memory providers (MCP) | ✅ (`--mcp-config`, both stdio & HTTP verified) | — (MCP is registration-based, not per-invocation) | — (no per-invocation MCP flag) |
 
-> **Status:** Claude Code adapter validated end-to-end against the real binary. **Codex and Cursor adapters are experimental** — built against current documented flags but not yet exercised on real installs. Running one? Rate-limit message reports are the most valuable contribution you can make.
+> **Status:** Claude Code's adapter is validated end-to-end against the real binary, including a full task run, cost parsing, and log ingestion. Codex's and Cursor's flag shapes are **verified against real installs** (not just docs) — including catching and fixing three real bugs (Codex's `-a` flag, `-s` on `resume`, and the missing `--skip-git-repo-check`) — but neither has completed an authenticated round-trip in this project (no test accounts). Rate-limit message samples from real hits are the most valuable contribution you can make — see the issue template.
 
 ## 🔮 Predict, Stats & Status
 
@@ -193,14 +236,20 @@ spareloop init                          detect CLIs, create data dir
 spareloop add [flags]                   queue a task
 spareloop list / show <id> / cancel <id> / run <id>
 spareloop account add|login|list|rm     multi-account management
-spareloop profile add|list|rm           reusable task presets
+spareloop profile add|list|rm           reusable task presets (incl. --memory)
 spareloop daemon install|start|stop|status|logs|pause|resume
 spareloop usage [--tool] [--days]       unified usage history
 spareloop predict [--tool]              burn-rate ETA + weekly pace
 spareloop stats [--tool] [--days]       peak/quiet-hour heatmap + waste report
 spareloop status --tool <t>             one-line status for statusLine/tmux/prompt
 spareloop suggest [--verbose]           pattern analysis + recommendations
-spareloop prewarm enable|disable|status
+spareloop prewarm enable|disable|status [--account]
+spareloop report [--hours] [--notify]   morning-after summary + git diffs
+spareloop memory list|status            memory-provider setup (Claude only)
+spareloop notify webhook set|unset|status|test <slack|discord>
+spareloop export --what usage|tasks --format csv|json [--out]
+spareloop doctor                        diagnose daemon/account/task health
+spareloop watch                         live dashboard
 ```
 
 ## ⚔️ vs. Alternatives
@@ -216,21 +265,22 @@ There's a great ecosystem of tools around this problem already — spareloop exi
 | **Learns your daily rhythm & prewarms your window** | — | — | — | ✅ |
 | Multi-account routing            | — | — | — | ✅ |
 | Task chains + session resume     | — | — | — | ✅ |
-| Auto-branch isolation (git worktree) | — | — | — | ✅ |
+| Auto-branch isolation (git worktree, auto-committed) | — | — | — | ✅ |
+| Morning report + Slack/Discord notifications | — | — | — | ✅ |
+| Memory providers via MCP | — | — | — | ✅ (Claude) |
 | Multi-tool (Claude / Codex / Cursor) | Claude only | Claude only | Claude only | ✅ |
 
 ccusage and the usage monitors tell you what happened; claude-queue lets you queue work. spareloop is the loop: it watches usage, learns your pattern, prewarms your window, and queues work into the capacity that would otherwise evaporate — across every tool you use.
 
 ## 🗺️ Roadmap
 
-- [x] Queue + daemon + prewarm + pattern learning (v0.1)
-- [x] Multi-account routing, task chains, session continuity, worktree isolation, profiles (v0.2)
-- [x] `spareloop predict` — live burn rate → "you hit the wall at 12:40pm" (v0.3)
-- [x] `spareloop stats` — peak/down hours heatmap + waste report (v0.3)
-- [x] Threshold alerts (50/75/90%) + OS notifications + status-line integration (v0.3)
-- [ ] Morning report: what ran overnight, diffs, costs
-- [ ] Memory providers (OpenMemory/Mem0, Supermemory, Zep, Letta via MCP)
-- [ ] Webhooks (Slack/Discord), CSV/JSON export, Windows support
+v0.1 → v0.4 shipped: queue + daemon + prewarm (per-account) + pattern learning, multi-account routing, task
+chains + session continuity, git-worktree isolation with auto-commit, saved profiles, burn-rate prediction,
+usage heatmap + waste report, threshold alerts, status line, morning report, Mem0/Supermemory memory providers,
+Slack/Discord webhooks, CSV/JSON export, `doctor`, `watch`.
+
+Full history (including real bugs found and fixed along the way) and what's next — Windows support, Zep/Letta
+providers, Codex/Cursor authenticated validation — is in **[ROADMAP.md](ROADMAP.md)**.
 
 ## ⭐ Star History
 
@@ -238,7 +288,7 @@ ccusage and the usage monitors tell you what happened; claude-queue lets you que
 
 ## 🤝 Contributing
 
-The highest-impact contributions right now: real-world **Codex/Cursor rate-limit message samples**, adapter validation on real installs, and the roadmap items above. Development:
+The highest-impact contribution right now: real-world **Codex/Cursor rate-limit message samples** — use the [rate-limit sample issue template](.github/ISSUE_TEMPLATE/rate-limit-sample.yml). See [ROADMAP.md](ROADMAP.md) for what else is open. Development:
 
 ```bash
 git clone https://github.com/VinayJogani14/spareloop && cd spareloop
