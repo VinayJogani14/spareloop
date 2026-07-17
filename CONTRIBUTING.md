@@ -50,8 +50,9 @@ directly from the synthetic events instead, so the output is reproducible.
 
 ## Regenerating the animated explainer video
 
-`demo/explainer.mp4` is drawn frame-by-frame with Pillow (Python) and encoded with
-ffmpeg — no screen recording, no manual video editor:
+`demo/explainer.mp4` and `demo/explainer.gif` are drawn frame-by-frame with Pillow
+(Python) and encoded with ffmpeg — no screen recording, no manual video editor. Both
+come from one script so they can't drift out of sync:
 
 ```bash
 python3 -c "import PIL"   # Pillow; pip3 install Pillow if missing
@@ -61,6 +62,10 @@ python3 demo/render_explainer.py
 It illustrates the prewarm mechanism itself (dead zone → prewarm ping → dead zone
 eliminated), using the same numbers as the real measured pattern. Edit the `SCENES`
 list and per-scene functions in `demo/render_explainer.py` to change timing or content.
+
+The GIF exists because GitHub's README renderer strips raw `<video>` tags entirely —
+only the GIF displays inline on the repo page. Link to the mp4 for anywhere video
+works better (X/Twitter, etc).
 
 ## Pull requests
 

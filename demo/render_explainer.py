@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Renders demo/explainer.mp4 - a code-drawn (not screen-recorded) animated
-explainer of the prewarm mechanism, frame by frame with Pillow, encoded with
-ffmpeg. No manual video editing; rerun this script to regenerate.
+Renders demo/explainer.mp4 AND demo/explainer.gif - a code-drawn (not
+screen-recorded) animated explainer of the prewarm mechanism, frame by frame
+with Pillow, encoded with ffmpeg. No manual video editing; rerun this script
+to regenerate both. The GIF is derived from the mp4 (GitHub's README renderer
+strips raw <video> tags, so the GIF is what actually displays inline there).
 
     python3 demo/render_explainer.py
 """
@@ -16,6 +18,7 @@ W, H = 1280, 720
 FPS = 30
 FRAMES_DIR = os.path.join(os.path.dirname(__file__), ".frames")
 OUT_PATH = os.path.join(os.path.dirname(__file__), "explainer.mp4")
+GIF_PATH = os.path.join(os.path.dirname(__file__), "explainer.gif")
 
 # Dracula-family palette, matching demo.gif for brand consistency.
 BG = (40, 42, 54)
@@ -341,6 +344,20 @@ def render():
     )
     shutil.rmtree(FRAMES_DIR)
     print(f"Wrote {OUT_PATH}")
+
+    # GitHub's README renderer strips raw <video> tags entirely - an animated
+    # GIF is what actually displays inline there. Derived from the same mp4
+    # (downscaled/lower-fps to keep the file size sane for a repo asset).
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", OUT_PATH,
+            "-vf", "fps=15,scale=800:-1:flags=lanczos,split[s0][s1];"
+                   "[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer",
+            GIF_PATH,
+        ],
+        check=True,
+    )
+    print(f"Wrote {GIF_PATH}")
 
 if __name__ == "__main__":
     render()

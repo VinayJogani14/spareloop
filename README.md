@@ -20,9 +20,9 @@
 <summary>▶ 25-second animated explainer (the prewarm mechanism, visually)</summary>
 <br>
 
-<video src="https://raw.githubusercontent.com/VinayJogani14/spareloop/main/demo/explainer.mp4" controls width="640"></video>
+![spareloop explainer: the dead zone, the prewarm ping, and the dead zone collapsing](demo/explainer.gif)
 
-If the player above doesn't render for you, grab [`demo/explainer.mp4`](demo/explainer.mp4) directly — code-rendered frame by frame (Pillow + ffmpeg), not screen-recorded. Free to reuse anywhere video works better than a GIF (X/Twitter posts, etc).
+Also available as [`demo/explainer.mp4`](demo/explainer.mp4) (sharper, smaller file) — code-rendered frame by frame with Pillow + ffmpeg, not screen-recorded. Grab the mp4 directly for X/Twitter or anywhere video works better than a GIF; GitHub's README renderer doesn't support inline `<video>`, hence the GIF version above.
 
 </details>
 
