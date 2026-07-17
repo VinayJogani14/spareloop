@@ -19,6 +19,10 @@
     "type": "git",
     "url": "git+https://github.com/VinayJogani14/spareloop.git"
   },
+  "homepage": "https://github.com/VinayJogani14/spareloop#readme",
+  "bugs": {
+    "url": "https://github.com/VinayJogani14/spareloop/issues"
+  },
   "bin": {
     "spareloop": "dist/src/cli/index.js"
   },

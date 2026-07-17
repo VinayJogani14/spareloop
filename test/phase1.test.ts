@@ -112,9 +112,18 @@ test('account router: auto skips a rate-limited account and env isolation is per
     assert.ok(envForAccount(route.account).CLAUDE_CONFIG_DIR.includes('claude-personal'));
   }
 
-  // Pinned to the blocked account -> unavailable.
+  // Pinned to the blocked account -> unavailable (temporary, keep retrying).
   const pinned = insertTask({ prompt: 'x', tool: 'claude', projectDir: os.tmpdir(), scheduleKind: 'asap', account: 'work' });
   assert.equal(routeAccount(getTask(pinned)!).kind, 'unavailable');
+});
+
+test('account router: nonexistent/wrong-tool account is misconfigured (permanent), not unavailable (temporary)', () => {
+  const badName = insertTask({ prompt: 'x', tool: 'claude', projectDir: os.tmpdir(), scheduleKind: 'asap', account: 'does-not-exist' });
+  assert.equal(routeAccount(getTask(badName)!).kind, 'misconfigured');
+
+  addAccount('codex-work', 'codex');
+  const wrongTool = insertTask({ prompt: 'x', tool: 'claude', projectDir: os.tmpdir(), scheduleKind: 'asap', account: 'codex-work' });
+  assert.equal(routeAccount(getTask(wrongTool)!).kind, 'misconfigured');
 });
 
 test('prepareWorkspace: git repo gets an isolated worktree branch; non-repo runs in place', () => {

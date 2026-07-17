@@ -69,6 +69,7 @@ program
   .option('--at <datetime>', 'explicit run time (ISO or "HH:MM" for next occurrence)')
   .option('--asap', 'run as soon as there is capacity')
   .option('--spare-capacity', 'run whenever the system detects spare capacity')
+  .option('--not-before <datetime>', 'earliest allowed time for asap/spare-capacity scheduling (ISO or "HH:MM")')
   .option('--not-after <datetime>', 'expire the task if not run by this time (ISO)')
   .option('--priority <n>', 'higher runs first', '0')
   .option('--max-attempts <n>', 'retry budget', '3')
@@ -140,6 +141,7 @@ program
       permissionMode: opts.permissionMode,
       scheduleKind,
       scheduleAt,
+      notBefore: opts.notBefore ? parseWhen(opts.notBefore).toISOString() : null,
       notAfter: opts.notAfter ? parseWhen(opts.notAfter).toISOString() : null,
       priority: parseInt(opts.priority, 10),
       maxAttempts: parseInt(opts.maxAttempts, 10),
@@ -276,6 +278,16 @@ account
   .command('rm <name>')
   .description('Unregister an account (credentials on disk are left untouched)')
   .action((name) => {
+    const referencing = getDb()
+      .prepare(`SELECT COUNT(*) AS n FROM tasks WHERE account = ? AND status IN ('queued','rate_limited')`)
+      .get(name) as { n: number };
+    if (referencing.n > 0) {
+      console.log(
+        `Warning: ${referencing.n} queued/rate-limited task(s) are pinned to account "${name}". ` +
+          `After removal they will fail with "account not found" instead of running. ` +
+          `Reassign them first (spareloop cancel <id> && re-add), or proceed if that's intended.`
+      );
+    }
     removeAccount(name);
     console.log(`Removed account "${name}" from spareloop. Its config dir was NOT deleted.`);
   });

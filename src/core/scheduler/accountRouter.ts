@@ -7,7 +7,13 @@ import { ToolName } from '../../adapters/types';
 export type RouteResult =
   | { kind: 'default' } // run with the user's normal login, no env override
   | { kind: 'account'; account: AccountRow }
-  | { kind: 'unavailable'; reason: string };
+  // Temporary: every candidate is currently rate-limited. Keep retrying -
+  // the daemon's rate-limit recovery pass will re-queue once a reset passes.
+  | { kind: 'unavailable'; reason: string }
+  // Permanent: the task can never succeed as configured (typo'd/removed
+  // account, wrong tool). Retrying forever would just spam the log every
+  // tick - the caller should fail the task instead.
+  | { kind: 'misconfigured'; reason: string };
 
 /**
  * Resolve which account a task should run under.
@@ -22,9 +28,9 @@ export function routeAccount(task: TaskRow, now = new Date()): RouteResult {
 
   if (task.account !== 'auto') {
     const acct = getAccount(task.account);
-    if (!acct) return { kind: 'unavailable', reason: `account "${task.account}" not found` };
+    if (!acct) return { kind: 'misconfigured', reason: `account "${task.account}" not found` };
     if (acct.tool !== task.tool)
-      return { kind: 'unavailable', reason: `account "${acct.name}" is a ${acct.tool} account, task is ${task.tool}` };
+      return { kind: 'misconfigured', reason: `account "${acct.name}" is a ${acct.tool} account, task is ${task.tool}` };
     return isBlocked(task.tool, acct.name, now)
       ? { kind: 'unavailable', reason: `account "${acct.name}" is rate-limited` }
       : { kind: 'account', account: acct };

@@ -43,9 +43,17 @@ export async function executeTask(task: TaskRow, log: (msg: string) => void): Pr
   const adapter = getAdapter(task.tool);
 
   const route = routeAccount(task);
+  if (route.kind === 'misconfigured') {
+    // Permanent problem (bad/removed account, wrong tool) — retrying every
+    // tick forever would never resolve it. Fail fast instead.
+    updateTaskStatus(task.id, 'failed');
+    log(`task ${task.id.slice(0, 8)} failed: ${route.reason}`);
+    return { runId: '', outcomeKind: 'skipped' };
+  }
   if (route.kind === 'unavailable') {
-    // Not an attempt — the task simply isn't launchable right now.
-    log(`task ${task.id.slice(0, 8)} not launchable: ${route.reason}`);
+    // Temporary — every candidate account is currently rate-limited. Not an
+    // attempt; stays queued and the daemon's recovery pass retries later.
+    log(`task ${task.id.slice(0, 8)} not launchable right now: ${route.reason}`);
     return { runId: '', outcomeKind: 'skipped' };
   }
   const accountName = route.kind === 'account' ? route.account.name : null;
