@@ -45,6 +45,20 @@ SPARELOOP_REPO_DIR=$(pwd) vhs demo/demo.tape
 `~/.claude` session logs on whatever machine renders it. It precomputes the pattern
 directly from the synthetic events instead, so the output is reproducible.
 
+## Regenerating the animated explainer video
+
+`demo/explainer.mp4` is drawn frame-by-frame with Pillow (Python) and encoded with
+ffmpeg — no screen recording, no manual video editor:
+
+```bash
+python3 -c "import PIL"   # Pillow; pip3 install Pillow if missing
+python3 demo/render_explainer.py
+```
+
+It illustrates the prewarm mechanism itself (dead zone → prewarm ping → dead zone
+eliminated), using the same numbers as the real measured pattern. Edit the `SCENES`
+list and per-scene functions in `demo/render_explainer.py` to change timing or content.
+
 ## Pull requests
 
 - One focused change per PR, with a test where behavior changed.

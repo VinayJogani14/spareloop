@@ -16,6 +16,16 @@
 
 ![spareloop demo: suggest, predict, and stats commands running against real usage history](demo/demo.gif)
 
+<details>
+<summary>▶ 25-second animated explainer (the prewarm mechanism, visually)</summary>
+<br>
+
+<video src="https://raw.githubusercontent.com/VinayJogani14/spareloop/main/demo/explainer.mp4" controls width="640"></video>
+
+If the player above doesn't render for you, grab [`demo/explainer.mp4`](demo/explainer.mp4) directly — code-rendered frame by frame (Pillow + ffmpeg), not screen-recorded. Free to reuse anywhere video works better than a GIF (X/Twitter posts, etc).
+
+</details>
+
 </div>
 
 ---
