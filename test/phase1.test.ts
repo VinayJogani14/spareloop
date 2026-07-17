@@ -13,7 +13,7 @@ import { addAccount, envForAccount, listAccounts } from '../src/core/accounts';
 import { routeAccount } from '../src/core/scheduler/accountRouter';
 import { dependencyGate } from '../src/daemon/loop';
 import { buildEffectivePrompt, resolveResumeSession } from '../src/daemon/taskRunner';
-import { prepareWorkspace, commitWorktreeChanges, diffStat } from '../src/core/git';
+import { prepareWorkspace, commitWorktreeChanges, diffStat, isLargeCommit, removeWorktree } from '../src/core/git';
 import { addProfile, getProfile } from '../src/core/profiles';
 
 test('schema v2: accounts table and new task columns exist', () => {
@@ -169,8 +169,9 @@ test('commitWorktreeChanges: agent edits land as a real commit, not just uncommi
   // Simulate what an agent does: create/edit files in the worktree.
   fs.writeFileSync(path.join(ws.worktreePath!, 'notes.txt'), 'hello from the agent');
 
-  const committed = commitWorktreeChanges(ws.worktreePath!, 'spareloop: attempt 1 (success) - test task');
-  assert.equal(committed, true);
+  const result = commitWorktreeChanges(ws.worktreePath!, 'spareloop: attempt 1 (success) - test task');
+  assert.equal(result.committed, true);
+  assert.equal(result.fileCount, 1);
 
   // The whole point: a diff against the branch now shows real, committed
   // changes - not nothing, which is what a bare uncommitted worktree gives.
@@ -179,7 +180,40 @@ test('commitWorktreeChanges: agent edits land as a real commit, not just uncommi
   assert.match(stat!, /notes\.txt/);
 
   // No-op on a clean worktree (nothing to commit).
-  assert.equal(commitWorktreeChanges(ws.worktreePath!, 'should not commit anything'), false);
+  const noop2 = commitWorktreeChanges(ws.worktreePath!, 'should not commit anything');
+  assert.equal(noop2.committed, false);
+  assert.equal(noop2.fileCount, 0);
+});
+
+test('isLargeCommit: flags unusually large file counts (e.g. an accidentally-swept build artifact)', () => {
+  assert.equal(isLargeCommit(5), false);
+  assert.equal(isLargeCommit(200), false);
+  assert.equal(isLargeCommit(201), true);
+  assert.equal(isLargeCommit(5000), true);
+});
+
+test('removeWorktree: real removal via git, branch stays checkable out afterward', () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'spareloop-rmwt-repo-'));
+  execFileSync('git', ['-C', repo, 'init'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', repo, 'config', 'user.email', 'test@test.dev'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', repo, 'config', 'user.name', 'Test'], { stdio: 'ignore' });
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'v1');
+  execFileSync('git', ['-C', repo, 'add', '.'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', repo, 'commit', '-m', 'init'], { stdio: 'ignore' });
+
+  const noop = () => {};
+  const ws = prepareWorkspace('9999888877776666', repo, 'auto', noop);
+  fs.writeFileSync(path.join(ws.worktreePath!, 'notes.txt'), 'hi');
+  commitWorktreeChanges(ws.worktreePath!, 'snapshot');
+
+  assert.ok(fs.existsSync(ws.worktreePath!));
+  const ok = removeWorktree(ws.worktreePath!, repo);
+  assert.equal(ok, true);
+  assert.ok(!fs.existsSync(ws.worktreePath!));
+
+  // Branch survives worktree removal - the whole point of not deleting it.
+  const branches = execFileSync('git', ['-C', repo, 'branch', '--list', ws.gitBranch!], { encoding: 'utf8' });
+  assert.match(branches, new RegExp(ws.gitBranch!.split('/')[1]));
 });
 
 test('profiles: round-trip with account and instructions', () => {

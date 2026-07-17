@@ -174,13 +174,14 @@ spareloop notify webhook test slack
 spareloop export --what usage --format csv --days 30 --out usage.csv    # or --format json
 spareloop doctor      # daemon health, account config-dir sanity, misconfigured tasks, memory-provider env
 spareloop watch       # live dashboard: window burn rate, queue, active tasks, recent activity
+spareloop clean       # dry-run by default; --yes removes finished tasks' worktrees (branches untouched)
 ```
 
 ## 🛡️ Safety Model
 
 Letting an agent work while you sleep requires trust. spareloop's defaults are built for it:
 
-- **Auto-branch isolation:** tasks in git repos run in a dedicated **git worktree** on branch `spareloop/<id>` — your working tree is never touched. Changes are **auto-committed onto the branch after every attempt** (success or failure), so `git diff`/`git log` against it always show real history and nothing is silently lost if the worktree gets cleaned up. Review over coffee: `git diff main...spareloop/a1b2c3d4`. Opt out per task with `--no-branch`.
+- **Auto-branch isolation:** tasks in git repos run in a dedicated **git worktree** on branch `spareloop/<id>` — your working tree is never touched. Changes are **auto-committed onto the branch after every attempt** (success or failure), so `git diff`/`git log` against it always show real history and nothing is silently lost if the worktree gets cleaned up. Review over coffee: `git diff main...spareloop/a1b2c3d4`. Opt out per task with `--no-branch`. (Uses `git add -A`, which respects the repo's own `.gitignore` and nothing beyond it — spareloop flags commits over 200 files in the daemon log as worth a second look before merging, in case a build artifact got swept in.) Run `spareloop clean` periodically to reclaim worktree disk space — it only removes the checked-out copy, never the branch/history.
 - **Safe permission modes by default:** Claude `--permission-mode dontAsk` (auto-denies outside your allow rules), Codex `-s workspace-write` (sandboxed — Codex's exec mode already runs with `approval: never` by default, since there's no TTY to prompt), Cursor allowlist. Nothing prompts, nothing hangs, nothing silently approved.
 - **Full bypass is opt-in, per task** (`--permission-mode full_bypass`) — for repos where you'd accept any outcome.
 - **One task per repo, one per tool, at a time.** No agent pile-ups.

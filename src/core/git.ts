@@ -3,6 +3,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { dataDir } from './paths';
 
+export interface CommitResult {
+  committed: boolean;
+  fileCount: number;
+}
+
+/** Above this many changed files, flag the commit as worth a second look -
+ *  likely an accidentally-swept build artifact (node_modules, dist, etc)
+ *  rather than intentional agent output. */
+const LARGE_COMMIT_FILE_THRESHOLD = 200;
+
 /**
  * Commit whatever the agent changed in a worktree onto its branch. Without
  * this, changes sit as uncommitted working-tree files: `git diff`/`git log`
@@ -11,21 +21,32 @@ import { dataDir } from './paths';
  * work. Commits on every outcome (not just success) so a failed/retried
  * attempt's partial work is never lost either. No-ops cleanly if the agent
  * made no changes.
+ *
+ * Uses `git add -A`, which respects the target repo's own .gitignore but
+ * nothing beyond that - if the repo doesn't ignore build artifacts (e.g. a
+ * task runs `npm install` in a repo with no node_modules entry) they get
+ * committed onto the review branch. Caller gets fileCount back to decide
+ * whether to warn.
  */
-export function commitWorktreeChanges(worktreePath: string, message: string): boolean {
+export function commitWorktreeChanges(worktreePath: string, message: string): CommitResult {
   try {
     const status = execFileSync('git', ['-C', worktreePath, 'status', '--porcelain'], {
       encoding: 'utf8',
     });
-    if (!status.trim()) return false; // nothing to commit
+    const lines = status.split('\n').filter((l) => l.trim());
+    if (lines.length === 0) return { committed: false, fileCount: 0 };
     execFileSync('git', ['-C', worktreePath, 'add', '-A'], { stdio: 'ignore' });
     execFileSync('git', ['-C', worktreePath, 'commit', '-m', message, '--no-verify'], {
       stdio: 'ignore',
     });
-    return true;
+    return { committed: true, fileCount: lines.length };
   } catch {
-    return false;
+    return { committed: false, fileCount: 0 };
   }
+}
+
+export function isLargeCommit(fileCount: number): boolean {
+  return fileCount > LARGE_COMMIT_FILE_THRESHOLD;
 }
 
 /** Compact `git diff --stat` summary between a repo's HEAD and one of its branches. */
@@ -38,6 +59,29 @@ export function diffStat(repoDir: string, branch: string): string | null {
     return out || null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Remove a worktree's checked-out directory. Does NOT delete the branch or
+ * its commits - `git worktree remove` only detaches the working copy, so the
+ * user can still `git checkout <branch>` afterward if they change their mind.
+ */
+export function removeWorktree(worktreePath: string, repoDir: string): boolean {
+  try {
+    execFileSync('git', ['-C', repoDir, 'worktree', 'remove', worktreePath, '--force'], {
+      stdio: 'ignore',
+    });
+    return true;
+  } catch {
+    // Repo may have moved/been deleted, or the worktree may already be gone -
+    // fall back to a plain directory removal so cleanup still makes progress.
+    try {
+      fs.rmSync(worktreePath, { recursive: true, force: true });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 

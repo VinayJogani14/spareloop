@@ -218,6 +218,37 @@ export interface RunWithTask {
   is_prewarm: number;
 }
 
+export interface CleanableWorktree {
+  worktree_path: string;
+  git_branch: string;
+  project_dir: string;
+  task_id: string;
+  task_status: string;
+  ended_at: string;
+}
+
+/**
+ * Worktrees belonging to tasks in a terminal state (succeeded/failed/
+ * cancelled/expired — never queued/running/rate_limited, which may still
+ * need the worktree for a retry), whose most recent run ended more than
+ * `olderThanDays` ago. One row per still-on-disk worktree.
+ */
+export function cleanableWorktrees(olderThanDays: number): CleanableWorktree[] {
+  return getDb()
+    .prepare(
+      `SELECT r.worktree_path, r.git_branch, t.project_dir, t.id AS task_id,
+              t.status AS task_status, r.ended_at
+       FROM task_runs r
+       JOIN tasks t ON t.id = r.task_id
+       WHERE r.worktree_path IS NOT NULL
+         AND t.status IN ('succeeded','failed','cancelled','expired')
+         AND r.ended_at IS NOT NULL
+         AND r.ended_at < datetime('now', ?)
+         AND r.id = (SELECT id FROM task_runs WHERE task_id = t.id ORDER BY started_at DESC LIMIT 1)`
+    )
+    .all(`-${olderThanDays} days`) as CleanableWorktree[];
+}
+
 /** Runs started within the last N hours, newest first — for the morning report. */
 export function runsSince(hours: number): RunWithTask[] {
   return getDb()

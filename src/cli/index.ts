@@ -27,7 +27,8 @@ import { predictWindow, predictWeekly } from '../core/patterns/predictor';
 import { computeHeatmap, computeWasteReport, renderHeatmapAscii } from '../core/patterns/heatmap';
 import { renderOneLine } from '../core/statusLine';
 import { runsSince } from '../core/repo';
-import { diffStat } from '../core/git';
+import { diffStat, removeWorktree } from '../core/git';
+import { cleanableWorktrees } from '../core/repo';
 import { notify } from '../notify/index';
 import { listMemoryProviders, getMemoryProvider, missingEnvFor, buildMemoryExtraArgs } from '../core/memory';
 import { getWebhookUrl, setWebhookUrl, listWebhooks, WebhookChannel } from '../notify/webhookConfig';
@@ -737,6 +738,34 @@ program
       if (isTty) process.stdout.write('\x1b[?25h'); // ensure cursor visible on exit
       process.exit(0);
     });
+  });
+
+program
+  .command('clean')
+  .description('Remove disk-space-consuming worktrees for finished tasks (never touches git branches/history)')
+  .option('--older-than <days>', 'only clean worktrees whose last run ended more than this many days ago', '3')
+  .option('--yes', 'actually remove (default is a dry-run listing)')
+  .action((opts) => {
+    const candidates = cleanableWorktrees(parseInt(opts.olderThan, 10));
+    if (candidates.length === 0) return console.log('Nothing to clean.');
+    if (!opts.yes) {
+      console.log(`Would remove ${candidates.length} worktree(s) (branches are kept — this only frees disk space):\n`);
+      for (const c of candidates) {
+        console.log(`  ${c.task_id.slice(0, 8)} [${c.task_status}] ${c.git_branch} — ${c.worktree_path}`);
+      }
+      console.log(`\nRe-run with --yes to actually remove them. The branch stays reachable: git checkout <branch>.`);
+      return;
+    }
+    let removed = 0;
+    for (const c of candidates) {
+      if (removeWorktree(c.worktree_path, c.project_dir)) {
+        removed++;
+        console.log(`  removed ${c.worktree_path}`);
+      } else {
+        console.log(`  failed to remove ${c.worktree_path} (project dir may no longer exist)`);
+      }
+    }
+    console.log(`\nRemoved ${removed}/${candidates.length} worktree(s). Branches are untouched.`);
   });
 
 program

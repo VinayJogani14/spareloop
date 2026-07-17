@@ -28,6 +28,9 @@ Rules of the codebase:
   in the type system (`RollingWindowAdapter`), not scattered `if (tool === 'cursor')`.
 - **The daemon must never crash on bad input.** Parsers are defensive; logging never throws.
 - Tests use `SPARELOOP_HOME` pointed at a temp dir. Tests must not spawn real AI CLIs.
+- New CLI commands need a test in `test/cliEndToEnd.test.ts` that spawns the actual compiled binary
+  (`execFileSync`) and checks real stdout/exit code — every other test file calls internal functions
+  directly and would miss a wiring regression in `cli/index.ts` itself (a renamed flag, a broken parser).
 
 ## Regenerating the README demo GIF
 

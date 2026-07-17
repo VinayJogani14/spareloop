@@ -29,9 +29,25 @@ const inFlightTaskIds = new Set<string>();
 /** Project dirs with a task currently executing — never two tasks in one repo. */
 const inFlightDirs = new Set<string>();
 
+/** Rotate once the log passes this size, keeping only the most recent lines. */
+const LOG_ROTATE_BYTES = 10 * 1024 * 1024; // 10MB
+const LOG_KEEP_LINES = 20_000;
+
+function rotateLogIfNeeded(): void {
+  try {
+    const stat = fs.statSync(daemonLogPath());
+    if (stat.size < LOG_ROTATE_BYTES) return;
+    const lines = fs.readFileSync(daemonLogPath(), 'utf8').split('\n');
+    fs.writeFileSync(daemonLogPath(), lines.slice(-LOG_KEEP_LINES).join('\n'));
+  } catch {
+    /* no log yet, or unreadable - nothing to rotate */
+  }
+}
+
 export function log(msg: string): void {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
   try {
+    rotateLogIfNeeded();
     fs.appendFileSync(daemonLogPath(), line);
   } catch {
     /* logging must never crash the daemon */

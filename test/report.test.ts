@@ -8,7 +8,7 @@ import { execFileSync } from 'child_process';
 process.env.SPARELOOP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'spareloop-report-'));
 
 import { getDb } from '../src/core/db';
-import { finishRun, insertRun, insertTask, runsSince } from '../src/core/repo';
+import { finishRun, insertRun, insertTask, runsSince, cleanableWorktrees } from '../src/core/repo';
 import { diffStat } from '../src/core/git';
 
 function initRepo(): string {
@@ -61,4 +61,34 @@ test('diffStat reflects real file changes on a branch, null when no diff exists'
   assert.equal(diffStat(repo, 'spareloop/empty'), null);
 
   assert.equal(diffStat(repo, 'branch-does-not-exist'), null);
+});
+
+test('cleanableWorktrees: only terminal-status tasks past the age threshold, never queued/running', () => {
+  const mkRun = (status: 'succeeded' | 'failed' | 'queued' | 'running', daysAgo: number, wt = '/tmp/wt-x') => {
+    const taskId = insertTask({ prompt: 'x', tool: 'claude', projectDir: os.tmpdir(), scheduleKind: 'asap' });
+    const runId = insertRun(taskId, 1, 'claude');
+    getDb()
+      .prepare(`UPDATE task_runs SET ended_at = datetime('now', ?), worktree_path = ?, git_branch = ? WHERE id = ?`)
+      .run(`-${daysAgo} days`, wt, 'spareloop/x', runId);
+    if (status === 'succeeded' || status === 'failed') {
+      getDb().prepare(`UPDATE tasks SET status = ? WHERE id = ?`).run(status, taskId);
+    } else {
+      getDb().prepare(`UPDATE tasks SET status = ? WHERE id = ?`).run(status, taskId);
+    }
+    return taskId;
+  };
+
+  const oldSucceeded = mkRun('succeeded', 10, '/tmp/wt-old-success');
+  mkRun('succeeded', 1, '/tmp/wt-recent-success'); // too recent
+  mkRun('running', 10, '/tmp/wt-still-running'); // non-terminal, never cleaned regardless of age
+  const oldFailed = mkRun('failed', 5, '/tmp/wt-old-fail');
+
+  const cleanable = cleanableWorktrees(3);
+  const paths = cleanable.map((c) => c.worktree_path);
+  assert.ok(paths.includes('/tmp/wt-old-success'));
+  assert.ok(paths.includes('/tmp/wt-old-fail'));
+  assert.ok(!paths.includes('/tmp/wt-recent-success'));
+  assert.ok(!paths.includes('/tmp/wt-still-running'));
+  assert.ok(cleanable.some((c) => c.task_id === oldSucceeded));
+  assert.ok(cleanable.some((c) => c.task_id === oldFailed));
 });
