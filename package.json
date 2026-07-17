@@ -1,6 +1,6 @@
 {
   "name": "spareloop",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Stop wasting your AI coding CLI usage windows. Queue tasks for spare capacity, learn your daily usage pattern, and prewarm your rolling window so resets land when you need them. Works with Claude Code, Codex CLI, and Cursor.",
   "keywords": [
     "claude-code",
